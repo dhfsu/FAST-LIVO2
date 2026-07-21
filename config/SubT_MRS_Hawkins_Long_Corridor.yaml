@@ -1,0 +1,97 @@
+common:
+  img_topic: "/camera_1/image_pinhole"
+  lid_topic: "/velodyne_points"
+  imu_topic: "/imu/data"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
+
+extrin_calib:
+  # T_imu_laser: laser frame -> IMU frame.
+  # Source: /home/zyl/catkin_ws/SubT_MRS_Hawkins_Long_Corridor_RC_Extrinsics.yaml
+  extrinsic_T: [0.080000000, 0.029000000, 0.030000000]
+  extrinsic_R: [0.999212900, -0.000519121,  0.004000000,
+                0.000516111,  0.999218492, -0.000939132,
+               -0.004000000,  0.000802565,  0.999993652]
+
+  # T_camera_laser = inverse(T_imu_camera) * T_imu_laser.
+  # The rectified pinhole image uses R=I, so its optical frame is unchanged.
+  Rcl: [-0.021080936, -0.998777565,  0.021064409,
+         0.003616277, -0.020990822, -0.999771971,
+         0.998992090, -0.021006651,  0.004059996]
+  Pcl: [0.021313588, -0.049438883, -0.099277864]
+
+time_offset:
+  lidar_time_offset: 0.0
+  imu_time_offset: 0.0
+  img_time_offset: 0.0
+  exposure_time_init: 0.0
+
+preprocess:
+  hilti_en: false
+  point_filter_num: 2
+  filter_size_surf: 0.1
+  lidar_type: 2  # VELO16; input type is sensor_msgs/PointCloud2
+  scan_line: 16
+  blind: 0.5
+
+vio:
+  max_iterations: 5
+  outlier_threshold: 1000
+  img_point_cov: 100
+  patch_size: 8
+  patch_pyrimid_level: 3
+  normal_en: true
+  raycast_en: false
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  inv_expo_cov: 0.1
+
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  acc_cov: 0.5
+  gyr_cov: 0.3
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
+
+lio:
+  max_iterations: 5
+  dept_err: 0.02
+  beam_err: 0.05
+  min_eigen_value: 0.0025
+  voxel_size: 0.5
+  max_layer: 2
+  max_points_num: 50
+  layer_init_num: [5, 5, 5, 5, 5]
+
+local_map:
+  map_sliding_en: false
+  half_map_size: 100
+  sliding_thresh: 8
+
+uav:
+  imu_rate_odom: false
+  gravity_align_en: false
+
+publish:
+  dense_map_en: true
+  pub_effect_point_en: false
+  pub_plane_en: false
+  pub_scan_num: 1
+  blind_rgb_points: 0.0
+
+evo:
+  seq_name: "SubT_MRS_Hawkins_Long_Corridor"
+  pose_output_en: true
+
+pcd_save:
+  pcd_save_en: false
+  type: 0
+  colmap_output_en: false
+  filter_size_pcd: 0.15
+  interval: -1
+
+image_save:
+  img_save_en: false
+  interval: 1
