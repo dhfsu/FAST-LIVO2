@@ -337,6 +337,10 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  // 迭代误差状态卡尔曼滤波(IESKF)状态估计:通过点到平面 ICP 观测更新位姿
+  // 入参 state_propagat 为 IMU 前向传播得到的先验状态,作为量测更新的参考点
+
+  // 预分配每个点的反对称矩阵列表与机体系协方差列表
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -346,36 +350,42 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   // ekf_time = 0.0;
   // double t0 = omp_get_wtime();
 
+  // 预计算每个点的测量协方差(与状态无关的部分)及其反对称矩阵,循环中复用
   for (size_t i = 0; i < feats_down_body_->size(); i++)
   {
     V3D point_this(feats_down_body_->points[i].x, feats_down_body_->points[i].y, feats_down_body_->points[i].z);
-    if (point_this[2] == 0) { point_this[2] = 0.001; }
+    if (point_this[2] == 0) { point_this[2] = 0.001; }  // 避免 z=0 造成除零
     M3D var;
+    // 根据深度误差与角度(光束)误差计算该点在雷达系下的测量协方差
     calcBodyCov(point_this, config_setting_.dept_err_, config_setting_.beam_err_, var);
     body_cov_list_.push_back(var);
-    point_this = extR_ * point_this + extT_;
+    point_this = extR_ * point_this + extT_;  // 雷达系 -> IMU/机体系(外参变换)
     M3D point_crossmat;
-    point_crossmat << SKEW_SYM_MATRX(point_this);
+    point_crossmat << SKEW_SYM_MATRX(point_this);  // 点坐标的反对称矩阵(用于旋转雅可比)
     cross_mat_list_.push_back(point_crossmat);
   }
 
+  // 重置带方差的点列表
   vector<pointWithVar>().swap(pv_list_);
   pv_list_.resize(feats_down_size_);
 
-  int rematch_num = 0;
+  int rematch_num = 0;  // 重新匹配计数,用于收敛后再触发一次重匹配
   MD(DIM_STATE, DIM_STATE) G, H_T_H, I_STATE;
   G.setZero();
   H_T_H.setZero();
   I_STATE.setIdentity();
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
+  // ===== IESKF 主迭代循环 =====
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
     double total_residual = 0.0;
+    // 用当前迭代的状态把点云投到世界系
     pcl::PointCloud<pcl::PointXYZI>::Ptr world_lidar(new pcl::PointCloud<pcl::PointXYZI>);
     TransformLidar(state_.rot_end, state_.pos_end, feats_down_body_, world_lidar);
-    M3D rot_var = state_.cov.block<3, 3>(0, 0);
-    M3D t_var = state_.cov.block<3, 3>(3, 3);
+    M3D rot_var = state_.cov.block<3, 3>(0, 0);  // 姿态协方差
+    M3D t_var = state_.cov.block<3, 3>(3, 3);    // 位置协方差
+    // 计算每个点在世界系下的总协方差(量测噪声 + 姿态不确定性 + 位置不确定性)
     for (size_t i = 0; i < feats_down_body_->size(); i++)
     {
       pointWithVar &pv = pv_list_[i];
@@ -384,6 +394,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
       M3D cov = body_cov_list_[i];
       M3D point_crossmat = cross_mat_list_[i];
+      /*
+      var =
+      R * var * R.transpose()                 // LiDAR测量噪声
+      + J_r * rot_cov * J_r.transpose()       // 姿态不确定性
+      + pos_cov;                              // 位置不确定性
+      */
       cov = state_.rot_end * cov * state_.rot_end.transpose() + (-point_crossmat) * rot_var * (-point_crossmat.transpose()) + t_var;
       pv.var = cov;
       pv.body_var = body_cov_list_[i];
@@ -392,40 +408,48 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     // double t1 = omp_get_wtime();
 
+    // 为每个点在体素地图中搜索匹配平面,构建点到平面残差列表(OMP 并行)
     BuildResidualListOMP(pv_list_, ptpl_list_);
 
     // build_residual_time += omp_get_wtime() - t1;
 
+    // 统计有效匹配点数与平均残差
     for (int i = 0; i < ptpl_list_.size(); i++)
     {
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
+    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
          << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
-    MatrixXd Hsub(effct_feat_num_, 6);
-    MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
-    VectorXd R_inv(effct_feat_num_);
-    VectorXd meas_vec(effct_feat_num_);
+    // 构建测量雅可比 H、测量噪声逆 R_inv 以及残差向量 meas_vec
+    MatrixXd Hsub(effct_feat_num_, 6);            // 测量雅可比(仅对姿态、位置 6 维)
+
+    MatrixXd Hsub_T_R_inv(6, effct_feat_num_);    // H^T * R^-1,用于加权
+
+    VectorXd R_inv(effct_feat_num_);              // 每个观测的测量噪声逆(权重)
+
+    VectorXd meas_vec(effct_feat_num_);           // 残差向量(点到平面距离)
+
     meas_vec.setZero();
     for (int i = 0; i < effct_feat_num_; i++)
     {
       auto &ptpl = ptpl_list_[i];
       V3D point_this(ptpl.point_b_);
-      point_this = extR_ * point_this + extT_;
+      point_this = extR_ * point_this + extT_;  // 雷达系 -> 机体系
       V3D point_body(ptpl.point_b_);
       M3D point_crossmat;
       point_crossmat << SKEW_SYM_MATRX(point_this);
 
       /*** get the normal vector of closest surface/corner ***/
 
+      // 用先验状态把点投到世界系,计算平面参数(法向 n、中心 q)对应的雅可比 J_nq
       V3D point_world = state_propagat.rot_end * point_this + state_propagat.pos_end;
       Eigen::Matrix<double, 1, 6> J_nq;
-      J_nq.block<1, 3>(0, 0) = point_world - ptpl_list_[i].center_;
-      J_nq.block<1, 3>(0, 3) = -ptpl_list_[i].normal_;
+      J_nq.block<1, 3>(0, 0) = point_world - ptpl_list_[i].center_;  // 对平面中心的偏导
+      J_nq.block<1, 3>(0, 3) = -ptpl_list_[i].normal_;              // 对平面法向的偏导
 
       M3D var;
       // V3D normal_b = state_.rot_end.inverse() * ptpl_list_[i].normal_;
@@ -441,50 +465,63 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
       //       state_propagat.cov.block<3, 3>(3, 3) - point_crossmat * state_propagat.cov.block<3, 3>(0, 0) * point_crossmat;
 
-      // point_body cov
+      // point_body cov —— 仅取量测点协方差旋转到世界系
       var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose();
 
+      // 平面参数不确定性在法向方向上的投影
       double sigma_l = J_nq * ptpl_list_[i].plane_var_ * J_nq.transpose();
 
+      // 量测噪声逆(权重)= 1 / (平面不确定性 + 点在法向上的不确定性),0.001 为数值下限
+      //三维点协方差 var 需要投影到残差方向。因为残差只关心法向方向
       R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
       // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
 
       /*** calculate the Measuremnt Jacobian matrix H ***/
+      // 残差对姿态的雅可比 A = [p]x * R^T * n,对位置的雅可比即平面法向 n
       V3D A(point_crossmat * state_.rot_end.transpose() * ptpl_list_[i].normal_);
       Hsub.row(i) << VEC_FROM_ARRAY(A), ptpl_list_[i].normal_[0], ptpl_list_[i].normal_[1], ptpl_list_[i].normal_[2];
       Hsub_T_R_inv.col(i) << A[0] * R_inv(i), A[1] * R_inv(i), A[2] * R_inv(i), ptpl_list_[i].normal_[0] * R_inv(i),
           ptpl_list_[i].normal_[1] * R_inv(i), ptpl_list_[i].normal_[2] * R_inv(i);
-      meas_vec(i) = -ptpl_list_[i].dis_to_plane_;
+      meas_vec(i) = -ptpl_list_[i].dis_to_plane_;  // 残差:负的点到平面距离
     }
     EKF_stop_flg = false;
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
+    // ===== 迭代卡尔曼滤波量测更新 =====
     MatrixXd K(DIM_STATE, effct_feat_num_);
-    // auto &&Hsub_T = Hsub.transpose();
-    auto &&HTz = Hsub_T_R_inv * meas_vec;
+    // auto &&Hsub_T = Hsub.transpose();  测量残差修正 HT*z=H^T*R^-1(-z_k)
+    auto &&HTz = Hsub_T_R_inv * meas_vec;         // H^T R^-1 z
     // fout_dbg<<"HTz: "<<HTz<<endl;
-    H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
+    H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;  // H^T R^-1 H(信息矩阵)
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
+    // 卡尔曼增益中间量 K_1 = (H^T R^-1 H + P^-1)^-1
+    //MD是a行b列的矩阵，VD是a维的列向量，M3D是3行3列的矩阵，V3D是3维的列向量
+    //.block()是指从矩阵左上角 (0,0) 开始,取一个 19×19 的子矩阵，因为像 H_T_H、state_.cov 这些矩阵声明时可能维数 ≥ DIM_STATE(留了余量),这里显式截取前 19×19 的有效部分参与运算,保证维数对齐
+    //K_1是后验信息矩阵的逆
     MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
     G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-    auto vec = state_propagat - state_;
+    auto vec = state_propagat - state_;  // 当前状态相对先验的偏差(误差状态)
+    // 求解状态增量:结合量测项 HTz 与先验约束项
     VD(DIM_STATE)
     solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
     int minRow, minCol;
-    state_ += solution;
-    auto rot_add = solution.block<3, 1>(0, 0);
-    auto t_add = solution.block<3, 1>(3, 0);
+    state_ += solution;  // 更新状态
+    auto rot_add = solution.block<3, 1>(0, 0);  // 姿态增量
+    auto t_add = solution.block<3, 1>(3, 0);    // 位置增量
+    // 增量足够小则判定为收敛(姿态 < 0.01°,位置 < 0.015cm)
     if ((rot_add.norm() * 57.3 < 0.01) && (t_add.norm() * 100 < 0.015)) { flg_EKF_converged = true; }
     V3D euler_cur = state_.rot_end.eulerAngles(2, 1, 0);
 
     /*** Rematch Judgement ***/
-
+    // 收敛或临近最后一次迭代时,触发一次重新匹配以刷新对应关系
     if (flg_EKF_converged || ((rematch_num == 0) && (iterCount == (config_setting_.max_iterations_ - 2)))) { rematch_num++; }
 
     /*** Convergence Judgements and Covariance Update ***/
+    // 完成两次重匹配或达到最大迭代次数,更新协方差并结束迭代
     if (!EKF_stop_flg && (rematch_num >= 2 || (iterCount == config_setting_.max_iterations_ - 1)))
     {
       /*** Covariance Update ***/
+      // 后验协方差更新: P = (I - G) P
       // _state.cov = (I_STATE - G) * _state.cov;
       state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) =
           (I_STATE.block<DIM_STATE, DIM_STATE>(0, 0) - G.block<DIM_STATE, DIM_STATE>(0, 0)) * state_.cov.block<DIM_STATE, DIM_STATE>(0, 0);

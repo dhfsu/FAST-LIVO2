@@ -398,6 +398,13 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       cov_w.block<3, 3>(10, 10).diagonal() = cov_bias_gyr * dt * dt; // bias gyro covariance
       cov_w.block<3, 3>(13, 13).diagonal() = cov_bias_acc * dt * dt; // bias acc covariance
 
+      /*
+      P_k^-=F_k * P_{k-1}^+ * F_k^T + Q_k
+      P_{k-1}^+：上一次 LIO/VIO 更新后的协方差；
+      F_k：IMU状态转移矩阵；
+      Q_k：IMU过程噪声，即代码中的 cov_w；
+      P_k^-：当前时刻预测协方差。
+      */
       state_inout.cov = F_x * state_inout.cov * F_x.transpose() + cov_w;
       // state_inout.cov.block<18,18>(0,0) = F_x.block<18,18>(0,0) *
       // state_inout.cov.block<18,18>(0,0) * F_x.block<18,18>(0,0).transpose() +
@@ -559,7 +566,10 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
     // lidar_meas.last_lio_update_time = pcl_end_time;
 
     if (meas.imu.empty()) { return; };
-    /// The very first lidar frame
+    // The very first lidar frame  
+    //stat.gravity   // 根据平均加速度估计
+    //stat.rot_end   // 设为单位阵
+    //stat.bias_g    // 设为0
     IMU_init(meas, stat, init_iter_num);
 
     imu_need_init = true;
@@ -583,6 +593,13 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
     return;
   }
 
+  //主要更新
+  /*stat.rot_end
+  stat.pos_end
+  stat.vel_end
+  stat.inv_expo_time
+  stat.cov
+  */
   UndistortPcl(lidar_meas, stat, *cur_pcl_un_);
   // cout << "[ IMU ] undistorted point num: " << cur_pcl_un_->size() << endl;
 }
