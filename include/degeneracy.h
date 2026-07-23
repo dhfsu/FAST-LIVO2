@@ -31,6 +31,7 @@ This module performs DETECTION ONLY. It never modifies the state or covariance.
 #include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <vector>
 
 namespace degeneracy
@@ -45,6 +46,18 @@ struct DegeneracyConfig
   double normal_scatter_thresh = 0.02; // LiDAR only: min eigenvalue of the (normalised) plane-normal scatter matrix
   int hysteresis_on = 3;           // consecutive raw-degenerate frames required to latch ON
   int hysteresis_off = 3;          // consecutive good frames required to latch OFF
+
+  // --- Adaptive (self-calibrating) thresholding ---
+  // When enabled, the plane-normal-scatter degeneracy test uses a threshold RELATIVE
+  // to the signal's own running median (thr = adaptive_alpha * median) instead of the
+  // fixed normal_scatter_thresh. This makes the detector largely sensor/dataset
+  // agnostic: empirically both hand-tuned LiDARs (Velodyne, Avia) land at ~0.15-0.18x
+  // their own median. normal_scatter_thresh is still used during warm-up (before enough
+  // samples accumulate). Only affects the LiDAR scatter test (VIO passes no normals).
+  bool adaptive = false;
+  double adaptive_alpha = 0.15;   // fraction of running median below which scatter is degenerate
+  int adaptive_window = 300;      // rolling-window length (frames) for the baseline median
+  int adaptive_min_samples = 50;  // frames required before switching from absolute to relative
 };
 
 struct DegeneracyResult
@@ -62,6 +75,8 @@ struct DegeneracyResult
   // Auxiliary metrics.
   double normal_scatter_min = -1.0; // LiDAR plane-normal scatter min eigenvalue; -1 when not computed
   int effective_num = 0;            // number of observations used in the update
+  double scatter_baseline = -1.0;    // running median of scatter (adaptive mode; -1 if not active/ready)
+  double scatter_thresh_used = -1.0; // effective scatter threshold applied this frame (-1 if no scatter)
 
   // Combined verdict.
   bool degenerate_raw = false; // instantaneous (this frame)
@@ -129,6 +144,31 @@ inline double normalScatterMinEigen(const std::vector<Eigen::Vector3d> &normals,
   return es.eigenvalues()(0);
 }
 
+// Fixed-size rolling window tracking the median of a scalar signal (for adaptive thresholds).
+class RollingBaseline
+{
+public:
+  void setWindow(size_t w) { window_ = std::max<size_t>(1, w); }
+  void push(double v)
+  {
+    buf_.push_back(v);
+    while (buf_.size() > window_) buf_.pop_front();
+  }
+  size_t size() const { return buf_.size(); }
+  double median() const
+  {
+    if (buf_.empty()) return -1.0;
+    std::vector<double> tmp(buf_.begin(), buf_.end());
+    size_t mid = tmp.size() / 2;
+    std::nth_element(tmp.begin(), tmp.begin() + mid, tmp.end());
+    return tmp[mid];
+  }
+
+private:
+  std::deque<double> buf_;
+  size_t window_ = 300;
+};
+
 // Stateful detector: analyses one update and applies temporal hysteresis.
 class DegeneracyDetector
 {
@@ -147,10 +187,27 @@ public:
     {
       Eigen::Vector3d dir;
       result.normal_scatter_min = normalScatterMinEigen(*normals, &dir);
-      if (result.normal_scatter_min >= 0.0 && result.normal_scatter_min < cfg.normal_scatter_thresh)
+      if (result.normal_scatter_min >= 0.0)
       {
-        result.trans_degenerate = true;
-        result.trans_degenerate_dir = dir;
+        // Effective scatter threshold: relative-to-running-median once adaptive mode
+        // has warmed up, otherwise the fixed absolute normal_scatter_thresh.
+        double thr = cfg.normal_scatter_thresh;
+        if (cfg.adaptive)
+        {
+          scatter_baseline_.setWindow(static_cast<size_t>(std::max(1, cfg.adaptive_window)));
+          scatter_baseline_.push(result.normal_scatter_min);
+          if (static_cast<int>(scatter_baseline_.size()) >= cfg.adaptive_min_samples)
+          {
+            result.scatter_baseline = scatter_baseline_.median();
+            thr = cfg.adaptive_alpha * result.scatter_baseline;
+          }
+        }
+        result.scatter_thresh_used = thr;
+        if (result.normal_scatter_min < thr)
+        {
+          result.trans_degenerate = true;
+          result.trans_degenerate_dir = dir;
+        }
       }
     }
 
@@ -176,6 +233,7 @@ private:
   int on_count_ = 0;
   int off_count_ = 0;
   bool latched_ = false;
+  RollingBaseline scatter_baseline_;
 };
 
 } // namespace degeneracy

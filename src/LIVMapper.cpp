@@ -136,6 +136,14 @@ void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
   nh.param<double>("degeneracy/vio/lambda_floor_rot", floor_r_vio, 1e-3);
   nh.param<double>("degeneracy/vio/lambda_floor_trans", floor_t_vio, 1e-3);
 
+  bool adaptive;
+  double adaptive_alpha;
+  int adaptive_window, adaptive_min_samples;
+  nh.param<bool>("degeneracy/adaptive/enable", adaptive, false);
+  nh.param<double>("degeneracy/adaptive/alpha", adaptive_alpha, 0.15);
+  nh.param<int>("degeneracy/adaptive/window", adaptive_window, 300);
+  nh.param<int>("degeneracy/adaptive/min_samples", adaptive_min_samples, 50);
+
   degen_cfg_lidar_.enable = enable;
   degen_cfg_lidar_.cond_thresh = cond;
   degen_cfg_lidar_.hysteresis_on = hyst_on;
@@ -143,6 +151,10 @@ void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
   degen_cfg_lidar_.lambda_floor_rot = floor_r_lidar;
   degen_cfg_lidar_.lambda_floor_trans = floor_t_lidar;
   degen_cfg_lidar_.normal_scatter_thresh = scatter;
+  degen_cfg_lidar_.adaptive = adaptive;
+  degen_cfg_lidar_.adaptive_alpha = adaptive_alpha;
+  degen_cfg_lidar_.adaptive_window = adaptive_window;
+  degen_cfg_lidar_.adaptive_min_samples = adaptive_min_samples;
 
   degen_cfg_vio_ = degen_cfg_lidar_;
   degen_cfg_vio_.lambda_floor_rot = floor_r_vio;
@@ -150,15 +162,16 @@ void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
 }
 
 // 将退化识别结果打包成 Float32MultiArray 发布(避免引入自定义 .msg)。
-// 数据布局(共 20 个 float):
+// 数据布局(共 22 个 float):
 //   [0] degenerate(latched 0/1) [1] degenerate_raw(0/1) [2] soft_factor
 //   [3] cond_rot [4] cond_trans [5..7] eval_rot [8..10] eval_trans
 //   [11..13] trans_degenerate_dir [14..16] rot_degenerate_dir
 //   [17] normal_scatter_min [18] effective_num [19] stamp(相对首帧时间)
+//   [20] scatter_baseline(自适应运行中位;-1未就绪) [21] scatter_thresh_used(本帧生效阈值)
 void LIVMapper::publishDegeneracy(const ros::Publisher &pub, const degeneracy::DegeneracyResult &r, double stamp)
 {
   std_msgs::Float32MultiArray msg;
-  msg.data.reserve(20);
+  msg.data.reserve(22);
   msg.data.push_back(r.degenerate ? 1.f : 0.f);
   msg.data.push_back(r.degenerate_raw ? 1.f : 0.f);
   msg.data.push_back(static_cast<float>(r.soft_factor));
@@ -171,6 +184,8 @@ void LIVMapper::publishDegeneracy(const ros::Publisher &pub, const degeneracy::D
   msg.data.push_back(static_cast<float>(r.normal_scatter_min));
   msg.data.push_back(static_cast<float>(r.effective_num));
   msg.data.push_back(static_cast<float>(stamp));
+  msg.data.push_back(static_cast<float>(r.scatter_baseline));
+  msg.data.push_back(static_cast<float>(r.scatter_thresh_used));
   pub.publish(msg);
 }
 

@@ -107,7 +107,13 @@ degeneracy:
   lidar:
     lambda_floor_rot: 1.0e-3
     lambda_floor_trans: 1.0e-3
-    normal_scatter_thresh: 0.02  # 走廊段<0.02,健康中位0.137(约7倍余量);干净分离
+    normal_scatter_thresh: 0.02  # warm-up 兜底绝对阈值(自适应模式下仅热身期用)
   vio:
     lambda_floor_rot: 1.0
     lambda_floor_trans: 1.0
+  # 自适应相对阈值:scatter 判据改用"低于运行中位数的 alpha 倍"(与传感器无关,一次设定跨数据集通用)
+  adaptive:
+    enable: true
+    alpha: 0.15        # 阈值 = alpha * 运行中位数(实测两 LiDAR 手调值均≈0.15-0.18×中位)
+    window: 300        # 滚动窗口帧数
+    min_samples: 50    # 热身:样本不足时退回上面的绝对 normal_scatter_thresh
