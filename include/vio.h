@@ -122,6 +122,8 @@ public:
   Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
   MatrixXd K, H_sub_inv;
 
+  degeneracy::DegeneracyDetector degeneracy_detector_; // VIO degeneracy detection (read-only)
+
   ofstream fout_camera, fout_colmap;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 

@@ -799,6 +799,18 @@ void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
   }
   state->cov -= G * state->cov;
   updateFrameState(*state);
+
+  // ===== 退化识别(只检测) =====
+  // 复用最细金字塔层收敛后的信息矩阵 H_T_H(前 6x6 姿态块;第 7 维曝光不参与退化分析)
+  if (degeneracy_detector_.cfg.enable)
+  {
+    const degeneracy::DegeneracyResult &dr = degeneracy_detector_.update(H_T_H.block<6, 6>(0, 0), nullptr, total_points);
+    if (dr.degenerate)
+    {
+      std::cout << "\033[1;31m[ VIO Degeneracy ] soft=" << dr.soft_factor << " cond_t=" << dr.cond_trans << " cond_r=" << dr.cond_rot
+                << " pts=" << total_points << " trans_dir=[" << dr.trans_degenerate_dir.transpose() << "]\033[0m" << std::endl;
+    }
+  }
 }
 
 void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)

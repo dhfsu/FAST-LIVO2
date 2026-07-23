@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <std_msgs/Float32MultiArray.h>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -114,9 +115,66 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
 
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
+
+  loadDegeneracyParams(nh);
 }
 
-void LIVMapper::initializeComponents() 
+// 加载退化识别参数。LiDAR 与 VIO 共享条件数/迟滞阈值,但各自的绝对特征值下限单列
+// (VIO 的 H_T_H 未做 R^-1 加权,量级与 LiDAR 不同)。默认关闭,不影响原有行为。
+void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
+{
+  bool enable;
+  double cond, scatter, floor_r_lidar, floor_t_lidar, floor_r_vio, floor_t_vio;
+  int hyst_on, hyst_off;
+  nh.param<bool>("degeneracy/enable", enable, false);
+  nh.param<double>("degeneracy/cond_thresh", cond, 100.0);
+  nh.param<int>("degeneracy/hysteresis_on", hyst_on, 3);
+  nh.param<int>("degeneracy/hysteresis_off", hyst_off, 3);
+  nh.param<double>("degeneracy/lidar/lambda_floor_rot", floor_r_lidar, 1e-3);
+  nh.param<double>("degeneracy/lidar/lambda_floor_trans", floor_t_lidar, 1e-3);
+  nh.param<double>("degeneracy/lidar/normal_scatter_thresh", scatter, 0.02);
+  nh.param<double>("degeneracy/vio/lambda_floor_rot", floor_r_vio, 1e-3);
+  nh.param<double>("degeneracy/vio/lambda_floor_trans", floor_t_vio, 1e-3);
+
+  degen_cfg_lidar_.enable = enable;
+  degen_cfg_lidar_.cond_thresh = cond;
+  degen_cfg_lidar_.hysteresis_on = hyst_on;
+  degen_cfg_lidar_.hysteresis_off = hyst_off;
+  degen_cfg_lidar_.lambda_floor_rot = floor_r_lidar;
+  degen_cfg_lidar_.lambda_floor_trans = floor_t_lidar;
+  degen_cfg_lidar_.normal_scatter_thresh = scatter;
+
+  degen_cfg_vio_ = degen_cfg_lidar_;
+  degen_cfg_vio_.lambda_floor_rot = floor_r_vio;
+  degen_cfg_vio_.lambda_floor_trans = floor_t_vio;
+}
+
+// 将退化识别结果打包成 Float32MultiArray 发布(避免引入自定义 .msg)。
+// 数据布局(共 20 个 float):
+//   [0] degenerate(latched 0/1) [1] degenerate_raw(0/1) [2] soft_factor
+//   [3] cond_rot [4] cond_trans [5..7] eval_rot [8..10] eval_trans
+//   [11..13] trans_degenerate_dir [14..16] rot_degenerate_dir
+//   [17] normal_scatter_min [18] effective_num [19] stamp(相对首帧时间)
+void LIVMapper::publishDegeneracy(const ros::Publisher &pub, const degeneracy::DegeneracyResult &r, double stamp)
+{
+  std_msgs::Float32MultiArray msg;
+  msg.data.reserve(20);
+  msg.data.push_back(r.degenerate ? 1.f : 0.f);
+  msg.data.push_back(r.degenerate_raw ? 1.f : 0.f);
+  msg.data.push_back(static_cast<float>(r.soft_factor));
+  msg.data.push_back(static_cast<float>(r.cond_rot));
+  msg.data.push_back(static_cast<float>(r.cond_trans));
+  for (int i = 0; i < 3; ++i) msg.data.push_back(static_cast<float>(r.eval_rot(i)));
+  for (int i = 0; i < 3; ++i) msg.data.push_back(static_cast<float>(r.eval_trans(i)));
+  for (int i = 0; i < 3; ++i) msg.data.push_back(static_cast<float>(r.trans_degenerate_dir(i)));
+  for (int i = 0; i < 3; ++i) msg.data.push_back(static_cast<float>(r.rot_degenerate_dir(i)));
+  msg.data.push_back(static_cast<float>(r.normal_scatter_min));
+  msg.data.push_back(static_cast<float>(r.effective_num));
+  msg.data.push_back(static_cast<float>(stamp));
+  pub.publish(msg);
+}
+
+void LIVMapper::initializeComponents()
 {
   downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
   extT << VEC_FROM_ARRAY(extrinT);
@@ -145,6 +203,10 @@ void LIVMapper::initializeComponents()
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
   vio_manager->initializeVIO();
+
+  // 将退化识别配置注入 LIO / VIO 两个检测器
+  voxelmap_manager->degeneracy_detector_.cfg = degen_cfg_lidar_;
+  vio_manager->degeneracy_detector_.cfg = degen_cfg_vio_;
 
   p_imu->set_extrinsic(extT, extR);
   p_imu->set_gyr_cov_scale(V3D(gyr_cov, gyr_cov, gyr_cov));
@@ -212,7 +274,8 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   mavros_pose_publisher = nh.advertise<geometry_msgs::PoseStamped>("/mavros/vision_pose/pose", 10);
   pubImage = it.advertise("/rgb_img", 1);
   pubImuPropOdom = nh.advertise<nav_msgs::Odometry>("/LIVO2/imu_propagate", 10000);
-  imu_prop_timer = nh.createTimer(ros::Duration(0.004), &LIVMapper::imu_prop_callback, this);
+  pubLidarDegeneracy = nh.advertise<std_msgs::Float32MultiArray>("/degeneracy/lidar", 100);
+  pubVioDegeneracy = nh.advertise<std_msgs::Float32MultiArray>("/degeneracy/vio", 100);  imu_prop_timer = nh.createTimer(ros::Duration(0.004), &LIVMapper::imu_prop_callback, this);
   voxelmap_manager->voxel_map_pub_= nh.advertise<visualization_msgs::MarkerArray>("/planes", 10000);
 }
 
@@ -307,6 +370,10 @@ void LIVMapper::handleVIO()
 
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
 
+  // 发布 VIO 退化识别结果
+  if (vio_manager->degeneracy_detector_.cfg.enable)
+    publishDegeneracy(pubVioDegeneracy, vio_manager->degeneracy_detector_.result, LidarMeasures.last_lio_update_time - _first_lidar_time);
+
   if (imu_prop_enable) 
   {
     ekf_finish_once = true;
@@ -381,6 +448,10 @@ void LIVMapper::handleLIO()
   voxelmap_manager->StateEstimation(state_propagat);
   _state = voxelmap_manager->state_;    // 取回更新后的状态
   _pv_list = voxelmap_manager->pv_list_;  // 取回带协方差的点列表
+
+  // 发布 LiDAR 退化识别结果
+  if (voxelmap_manager->degeneracy_detector_.cfg.enable)
+    publishDegeneracy(pubLidarDegeneracy, voxelmap_manager->degeneracy_detector_.result, LidarMeasures.last_lio_update_time - _first_lidar_time);
 
   double t2 = omp_get_wtime();  // ICP 结束
 

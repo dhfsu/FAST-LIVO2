@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define VOXEL_MAP_H_
 
 #include "common_lib.h"
+#include "degeneracy.h"
 #include <Eigen/Dense>
 #include <fstream>
 #include <math.h>
@@ -205,6 +206,8 @@ public:
   int scan_count = 0;
   StatesGroup state_;
   V3D position_last_;
+
+  degeneracy::DegeneracyDetector degeneracy_detector_; // LiDAR degeneracy detection (read-only)
 
   V3D last_slide_position = {0,0,0};
 

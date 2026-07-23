@@ -1,0 +1,22 @@
+<launch>
+  <!-- Launch file for the Corridor01 dataset (Livox Avia + RealSense color). -->
+
+  <arg name="rviz" default="true" />
+
+  <rosparam command="load" file="$(find fast_livo)/config/livox.yaml" />
+
+  <!-- Bag只有压缩图像(sensor_msgs/CompressedImage);FAST-LIVO2订阅原始sensor_msgs/Image,
+       故用image_transport republish在线解压到 /camera/color/image_decompressed -->
+  <node name="decompress_color" pkg="image_transport" type="republish" args="compressed raw" output="screen">
+    <remap from="in"  to="/camera/color/image_raw" />
+    <remap from="out" to="/camera/color/image_decompressed" />
+  </node>
+
+  <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
+    <rosparam file="$(find fast_livo)/config/livox_camera.yaml" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  </group>
+</launch>

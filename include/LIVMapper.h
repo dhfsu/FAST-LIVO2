@@ -57,6 +57,8 @@ public:
   void publish_mavros(const ros::Publisher &mavros_pose_publisher);
   void publish_path(const ros::Publisher pubPath);
   void readParameters(ros::NodeHandle &nh);
+  void loadDegeneracyParams(ros::NodeHandle &nh);
+  void publishDegeneracy(const ros::Publisher &pub, const degeneracy::DegeneracyResult &r, double stamp);
   template <typename T> void set_posestamp(T &out);
   template <typename T> void pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi, Eigen::Matrix<T, 3, 1> &po);
   template <typename T> Eigen::Matrix<T, 3, 1> pointBodyToWorld(const Eigen::Matrix<T, 3, 1> &pi);
@@ -183,5 +185,10 @@ public:
   double aver_time_icp = 0;
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
+
+  // ===== 退化识别 =====
+  degeneracy::DegeneracyConfig degen_cfg_lidar_, degen_cfg_vio_;
+  ros::Publisher pubLidarDegeneracy;
+  ros::Publisher pubVioDegeneracy;
 };
 #endif

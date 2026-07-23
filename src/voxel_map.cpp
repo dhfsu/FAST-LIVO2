@@ -536,6 +536,21 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     if (EKF_stop_flg) break;
   }
 
+  // ===== 退化识别(只检测,不改变状态/协方差更新) =====
+  // 复用收敛后的信息矩阵 H_T_H(前 6x6 为姿态+位置块)与匹配平面法向做退化分析
+  if (degeneracy_detector_.cfg.enable)
+  {
+    std::vector<Eigen::Vector3d> normals;
+    normals.reserve(ptpl_list_.size());
+    for (const auto &ptpl : ptpl_list_) { normals.push_back(ptpl.normal_); }
+    const degeneracy::DegeneracyResult &dr = degeneracy_detector_.update(H_T_H.block<6, 6>(0, 0), &normals, effct_feat_num_);
+    if (dr.degenerate)
+    {
+      std::cout << "\033[1;31m[ LIO Degeneracy ] soft=" << dr.soft_factor << " cond_t=" << dr.cond_trans << " cond_r=" << dr.cond_rot
+                << " scatter_min=" << dr.normal_scatter_min << " trans_dir=[" << dr.trans_degenerate_dir.transpose() << "]\033[0m" << std::endl;
+    }
+  }
+
   // double t2 = omp_get_wtime();
   // scan_count++;
   // ekf_time = t2 - t0 - build_residual_time;
