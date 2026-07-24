@@ -95,20 +95,3 @@ pcd_save:
 image_save:
   img_save_en: false
   interval: 1
-
-# ===== 退化识别(只检测、发布话题,不改变状态估计) =====
-# 打开后会在 LIO/VIO 每帧更新后分析 6x6 姿态信息矩阵,并发布:
-#   /degeneracy/lidar 、 /degeneracy/vio  (std_msgs/Float32MultiArray)
-# 长走廊/隧道场景建议先用本块观察 cond_trans 与 normal_scatter_min 再标定阈值。
-degeneracy:
-  enable: true            # 总开关,默认关闭时零开销、不影响原行为
-  cond_thresh: 300.0      # 条件数阈值:标定自 t=103.8s 失效事件,健康误报4.2%/失效前检出92%(原100→误报9.9%)
-  hysteresis_on: 3        # 连续 N 帧判退化才置位(去抖)
-  hysteresis_off: 3       # 连续 N 帧良态才复位
-  lidar:
-    lambda_floor_rot: 1.0e-3      # 旋转信息最强特征值下限(LiDAR 量级很大,仅作近零保护)
-    lambda_floor_trans: 1.0e-3    # 平移信息最强特征值下限
-    normal_scatter_thresh: 0.005  # 标定值:健康误报4.0%/失效前检出96.2%(原0.02→误报28.9%,过灵敏)
-  vio:
-    lambda_floor_rot: 1.0         # VIO 的 H_T_H 未加权;实测最强特征值呈双峰(盲~1e-14 / 有效~1e6),阈值取双峰间隙
-    lambda_floor_trans: 1.0

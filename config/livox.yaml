@@ -94,20 +94,3 @@ pcd_save:
 image_save:
   img_save_en: false
   interval: 1
-
-# ===== 退化识别(只检测、发布话题) =====
-# 已按本数据集(Livox Avia)标定:走廊段(t≈40-60/150-173/390-403s)沿走廊轴(世界X)
-# 平移退化,scatter降到0.003-0.02、cond升到40-280;房间/路口段 scatter>0.05、cond<10。
-# Avia竖直覆盖比Velodyne密,整体scatter偏高,故阈值高于SubT(0.005)。
-degeneracy:
-  enable: true
-  cond_thresh: 100.0            # 走廊段cond达40-280,房间段<10;健康p95≈87
-  hysteresis_on: 3
-  hysteresis_off: 3
-  lidar:
-    lambda_floor_rot: 1.0e-3
-    lambda_floor_trans: 1.0e-3
-    normal_scatter_thresh: 0.02  # 走廊段<0.02,健康中位0.137(约7倍余量);干净分离
-  vio:
-    lambda_floor_rot: 1.0
-    lambda_floor_trans: 1.0
