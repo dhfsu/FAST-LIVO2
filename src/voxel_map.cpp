@@ -370,9 +370,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   pv_list_.resize(feats_down_size_);
 
   int rematch_num = 0;  // 重新匹配计数,用于收敛后再触发一次重匹配
-  MD(DIM_STATE, DIM_STATE) G, H_T_H, I_STATE;
+  MD(DIM_STATE, DIM_STATE) G, H, I_STATE;
   G.setZero();
-  H_T_H.setZero();
+  H.setZero();
   I_STATE.setIdentity();
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
@@ -424,12 +424,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
          << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
-    /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
+    /*** Computation of Measuremnt Jacobian matrix J and measurents covarience
      * ***/
-    // 构建测量雅可比 H、测量噪声逆 R_inv 以及残差向量 meas_vec
-    MatrixXd Hsub(effct_feat_num_, 6);            // 测量雅可比(仅对姿态、位置 6 维)
+    // 构建测量雅可比 J、测量噪声逆 R_inv 以及残差向量 meas_vec
+    MatrixXd Jsub(effct_feat_num_, 6);            // 测量雅可比（仅对姿态、位置 6 维）
 
-    MatrixXd Hsub_T_R_inv(6, effct_feat_num_);    // H^T * R^-1,用于加权
+    MatrixXd Jsub_T_R_inv(6, effct_feat_num_);    // J^T * R^-1，用于加权
 
     VectorXd R_inv(effct_feat_num_);              // 每个观测的测量噪声逆(权重)
 
@@ -478,11 +478,11 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
       // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
 
-      /*** calculate the Measuremnt Jacobian matrix H ***/
+      /*** calculate the Measuremnt Jacobian matrix J ***/
       // 残差对姿态的雅可比 A = [p]x * R^T * n,对位置的雅可比即平面法向 n
       V3D A(point_crossmat * state_.rot_end.transpose() * ptpl_list_[i].normal_);
-      Hsub.row(i) << VEC_FROM_ARRAY(A), ptpl_list_[i].normal_[0], ptpl_list_[i].normal_[1], ptpl_list_[i].normal_[2];
-      Hsub_T_R_inv.col(i) << A[0] * R_inv(i), A[1] * R_inv(i), A[2] * R_inv(i), ptpl_list_[i].normal_[0] * R_inv(i),
+      Jsub.row(i) << VEC_FROM_ARRAY(A), ptpl_list_[i].normal_[0], ptpl_list_[i].normal_[1], ptpl_list_[i].normal_[2];
+      Jsub_T_R_inv.col(i) << A[0] * R_inv(i), A[1] * R_inv(i), A[2] * R_inv(i), ptpl_list_[i].normal_[0] * R_inv(i),
           ptpl_list_[i].normal_[1] * R_inv(i), ptpl_list_[i].normal_[2] * R_inv(i);
       meas_vec(i) = -ptpl_list_[i].dis_to_plane_;  // 残差:负的点到平面距离
     }
@@ -491,21 +491,21 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     /*** Iterative Kalman Filter Update ***/
     // ===== 迭代卡尔曼滤波量测更新 =====
     MatrixXd K(DIM_STATE, effct_feat_num_);
-    // auto &&Hsub_T = Hsub.transpose();  测量残差修正 HT*z=H^T*R^-1(-z_k)
-    auto &&HTz = Hsub_T_R_inv * meas_vec;         // H^T R^-1 z
-    // fout_dbg<<"HTz: "<<HTz<<endl;
-    H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;  // H^T R^-1 H(信息矩阵)
-    // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
-    // 卡尔曼增益中间量 K_1 = (H^T R^-1 H + P^-1)^-1
+    // auto &&Jsub_T = Jsub.transpose();  测量残差修正 JTz=J^T*R^-1(-z_k)
+    auto &&JTz = Jsub_T_R_inv * meas_vec;          // J^T R^-1 z
+    // fout_dbg<<"JTz: "<<JTz<<endl;
+    H.block<6, 6>(0, 0) = Jsub_T_R_inv * Jsub; // J^T R^-1 J（Hessian/信息矩阵）
+    // EigenSolver<Matrix<double, 6, 6>> es(H.block<6,6>(0,0));
+    // 卡尔曼增益中间量 K_1 = (J^T R^-1 J + P^-1)^-1
     //MD是a行b列的矩阵，VD是a维的列向量，M3D是3行3列的矩阵，V3D是3维的列向量
-    //.block()是指从矩阵左上角 (0,0) 开始,取一个 19×19 的子矩阵，因为像 H_T_H、state_.cov 这些矩阵声明时可能维数 ≥ DIM_STATE(留了余量),这里显式截取前 19×19 的有效部分参与运算,保证维数对齐
+    //.block()是指从矩阵左上角 (0,0) 开始,取一个 19×19 的子矩阵，因为像 H、state_.cov 这些矩阵声明时可能维数 ≥ DIM_STATE(留了余量),这里显式截取前 19×19 的有效部分参与运算,保证维数对齐
     //K_1是后验信息矩阵的逆
-    MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
-    G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
+    MD(DIM_STATE, DIM_STATE) &&K_1 = (H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
+    G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H.block<6, 6>(0, 0);
     auto vec = state_propagat - state_;  // 当前状态相对先验的偏差(误差状态)
-    // 求解状态增量:结合量测项 HTz 与先验约束项
+    // 求解状态增量：结合量测项 JTz 与先验约束项
     VD(DIM_STATE)
-    solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+    solution = K_1.block<DIM_STATE, 6>(0, 0) * JTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
 
     // ===== 退化处理:解空间投影(Solution Remapping) =====
     // 仅在启用处理且已置位退化时:把信息矩阵中不可观的特征方向从位姿增量里投影掉,
@@ -515,7 +515,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       int rm_r = 0, rm_t = 0;
       bool soft = degeneracy_detector_.cfg.soft_remap;
       // 平移处理(主):走廊/隧道退化就在平移。soft=按可观性衰减,hard=硬投影(易 runaway)
-      M3D Pt = degeneracy::degenerateProjection(H_T_H.block<3, 3>(3, 3), degeneracy_detector_.cfg.remap_ratio, soft, &rm_t);
+      M3D Pt = degeneracy::degenerateProjection(H.block<3, 3>(3, 3), degeneracy_detector_.cfg.remap_ratio, soft, &rm_t);
       V3D trans_inc = Pt * solution.block<3, 1>(3, 0);   // 用临时量避免 Eigen 混叠
       solution.block<3, 1>(3, 0) = trans_inc;
       // 协方差一致性:同样投影卡尔曼增益 G 的平移状态行,使 P=(I-G)P 在退化方向保留先验不确定性,
@@ -528,7 +528,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // 旋转处理(默认关):旋转信息天然各向异性,cond_r 常态就 100+,投影会误伤朝向->漂移
       if (degeneracy_detector_.cfg.remap_rot_en)
       {
-        M3D Pr = degeneracy::degenerateProjection(H_T_H.block<3, 3>(0, 0), degeneracy_detector_.cfg.remap_ratio, soft, &rm_r);
+        M3D Pr = degeneracy::degenerateProjection(H.block<3, 3>(0, 0), degeneracy_detector_.cfg.remap_ratio, soft, &rm_r);
         V3D rot_inc = Pr * solution.block<3, 1>(0, 0);
         solution.block<3, 1>(0, 0) = rot_inc;
         if (degeneracy_detector_.cfg.handling_cov_en)
@@ -575,13 +575,13 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   }
 
   // ===== 退化识别(只检测,不改变状态/协方差更新) =====
-  // 复用收敛后的信息矩阵 H_T_H(前 6x6 为姿态+位置块)与匹配平面法向做退化分析
+  // 复用收敛后的 Hessian/信息矩阵 H（前 6x6 为姿态+位置块）与匹配平面法向做退化分析
   if (degeneracy_detector_.cfg.enable)
   {
     std::vector<Eigen::Vector3d> normals;
     normals.reserve(ptpl_list_.size());
     for (const auto &ptpl : ptpl_list_) { normals.push_back(ptpl.normal_); }
-    const degeneracy::DegeneracyResult &dr = degeneracy_detector_.update(H_T_H.block<6, 6>(0, 0), &normals, effct_feat_num_);
+    const degeneracy::DegeneracyResult &dr = degeneracy_detector_.update(H.block<6, 6>(0, 0), &normals, effct_feat_num_);
     if (dr.degenerate)
     {
       std::cout << "\033[1;31m[ LIO Degeneracy ] soft=" << dr.soft_factor << " cond_t=" << dr.cond_trans << " cond_r=" << dr.cond_rot
