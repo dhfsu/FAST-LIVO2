@@ -11,6 +11,10 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 
 LIVMapper::LIVMapper(ros::NodeHandle &nh)
     : extT(0, 0, 0),
@@ -394,21 +398,31 @@ void LIVMapper::handleLIO()
   }
 
   // 按 TUM 格式(time x y z qx qy qz qw)输出位姿轨迹,便于用 evo 等工具做精度评估
+  // 每次运行保存到 Log/trajectory/ 下、以启动时刻的时间戳命名,不覆盖历史轨迹
   if (pose_output_en)
   {
     static bool pos_opend = false;
-    static int ocount = 0;
-    std::ofstream outFile, evoFile;
-    if (!pos_opend)   // 首次以覆盖模式打开文件
+    static std::string traj_path;  // 本次运行的轨迹文件路径(首帧生成后固定)
+    std::ofstream evoFile;
+    if (!pos_opend)   // 首次:生成带时间戳的文件名并以覆盖模式创建
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::out);
+      const std::string traj_dir = std::string(ROOT_DIR) + "Log/trajectory/";
+      std::error_code ec;
+      std::filesystem::create_directories(traj_dir, ec);  // 目录不存在则创建
+      std::time_t now = std::time(nullptr);
+      std::tm tm_buf;
+      localtime_r(&now, &tm_buf);
+      std::ostringstream ss;
+      ss << seq_name << '_' << std::put_time(&tm_buf, "%Y-%m-%d_%H-%M-%S") << ".txt";
+      traj_path = traj_dir + ss.str();
+      evoFile.open(traj_path, std::ios::out);
       pos_opend = true;
-      if (!evoFile.is_open()) ROS_ERROR("open fail\n");
+      if (!evoFile.is_open()) ROS_ERROR("open trajectory file fail: %s\n", traj_path.c_str());
     }
     else              // 之后以追加模式打开文件
     {
-      evoFile.open(std::string(ROOT_DIR) + "Log/result/" + seq_name + ".txt", std::ios::app);
-      if (!evoFile.is_open()) ROS_ERROR("open fail\n");
+      evoFile.open(traj_path, std::ios::app);
+      if (!evoFile.is_open()) ROS_ERROR("open trajectory file fail: %s\n", traj_path.c_str());
     }
     Eigen::Matrix4d outT;
     Eigen::Quaterniond q(_state.rot_end);  // 旋转矩阵转四元数
