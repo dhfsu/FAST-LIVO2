@@ -783,12 +783,15 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
 void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
+  //如果从视觉稀疏地图中取到的观测点为 0 个,就没有东西可更新,直接 return。
   if (total_points == 0) return;
   
   compute_jacobian_time = update_ekf_time = 0.0;
+  vio_remap_applied_ = false;
 
   for (int level = patch_pyrimid_level - 1; level >= 0; level--)
   {
+    //inverse_composition_en 为真时使用 逆向组合(Inverse Compositional) 方式(updateStateInverse),可以在参考 patch 一侧预先算好雅可比,速度更快
     if (inverse_composition_en)
     {
       has_ref_patch_cache = false;
@@ -797,18 +800,21 @@ void VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
     else
       updateState(img, level);
   }
+  //更新收敛后的后验协方差
   state->cov -= G * state->cov;
   updateFrameState(*state);
 
   // ===== 退化识别(只检测) =====
+  // VIO 检测:无量纲条件数(方向性) + total_points 自适应(整体弱/盲),不依赖绝对特征值下限。
   // 复用最细金字塔层收敛后的信息矩阵 H_T_H(前 6x6 姿态块;第 7 维曝光不参与退化分析)
   if (degeneracy_detector_.cfg.enable)
   {
-    const degeneracy::DegeneracyResult &dr = degeneracy_detector_.update(H_T_H.block<6, 6>(0, 0), nullptr, total_points);
+    const degeneracy::DegeneracyResult &dr = degeneracy_detector_.updateVisual(H_T_H.block<6, 6>(0, 0), total_points);
     if (dr.degenerate)
     {
       std::cout << "\033[1;31m[ VIO Degeneracy ] soft=" << dr.soft_factor << " cond_t=" << dr.cond_trans << " cond_r=" << dr.cond_rot
-                << " pts=" << total_points << " trans_dir=[" << dr.trans_degenerate_dir.transpose() << "]\033[0m" << std::endl;
+                << " pts=" << total_points << " pts_thr=" << dr.scatter_thresh_used << " remap=" << (vio_remap_applied_ ? "APPLIED" : "no")
+                << " trans_dir=[" << dr.trans_degenerate_dir.transpose() << "]\033[0m" << std::endl;
     }
   }
 }
@@ -1407,10 +1413,25 @@ void VIOManager::precomputeReferencePatches(int level)
   has_ref_patch_cache = true;
 }
 
+  /*
+  逆组合(Inverse Compositional)直接法更新:
+  图像梯度和基础雅可比在参考图像块上预计算并缓存,迭代时只需重算当前投影、
+  光度残差以及缓存雅可比到当前状态扰动模型的变换,从而减少重复计算。
+  */
 void VIOManager::updateStateInverse(cv::Mat img, int level)
 {
+  // 逆组合(Inverse Compositional)直接法更新:
+  // 图像梯度和基础雅可比在参考图像块上预计算并缓存,迭代时只需重算当前投影、
+  // 光度残差以及缓存雅可比到当前状态扰动模型的变换,从而减少重复计算。
+
+  // 当前层没有可用视觉地图点时直接返回。
   if (total_points == 0) return;
+
+  // 保存最近一次被接受的状态,当新迭代使光度误差增大时用于回退。
   StatesGroup old_state = (*state);
+
+  // 投影点、雅可比及残差容器。H_sub 的6列依次对应旋转扰动和平移扰动。
+  // Jimg/Jdpi/Jdphi/Jdp 保留为该更新模型的中间变量,当前实现主要使用缓存 H_sub_inv。
   V2D pc;
   MD(1, 2) Jimg;
   MD(2, 3) Jdpi;
@@ -1419,9 +1440,13 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
   MatrixXd H_sub;
   bool EKF_end = false;
   float last_error = std::numeric_limits<float>::max();
+  // 每次进入该函数时重新统计当前金字塔层的雅可比构造和滤波更新时间。
   compute_jacobian_time = update_ekf_time = 0.0;
+  // IMU 世界系位置的反对称矩阵,用于将缓存雅可比转换到当前状态扰动坐标系。
   M3D P_wi_hat;
+  // z_init、count_outlier 和 p_hat 是保留的调试/扩展变量,当前逻辑未使用。
   bool z_init = true;
+  // 每个视觉地图点的整块 patch 都作为观测,因此总观测维数为点数乘像素数。
   const int H_DIM = total_points * patch_size_total;
 
   z.resize(H_DIM);
@@ -1432,11 +1457,18 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
 
   for (int iteration = 0; iteration < max_iterations; iteration++)
   {
+    // 统计当前迭代构造残差和雅可比矩阵的耗时。
     double t1 = omp_get_wtime();
     double count_outlier = 0;
+    // 同一金字塔层第一次迭代时,在参考图像块上预计算灰度梯度和基础雅可比;
+    // 后续迭代复用缓存,这是逆组合方法的主要效率来源。
     if (has_ref_patch_cache == false) precomputeReferencePatches(level);
+    // n_meas 是有效像素观测数,error 累积所有有效图像块的平方光度误差。
     int n_meas = 0;
     float error = 0.0;
+
+    // 根据当前 IMU 世界位姿和相机-IMU外参构造世界系到相机系的变换:
+    // p_c = Rcw * p_w + Pcw。
     M3D Rwi(state->rot_end);
     V3D Pwi(state->pos_end);
     P_wi_hat << SKEW_SYM_MATRX(Pwi);
@@ -1449,15 +1481,18 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
     {
       float patch_error = 0.0;
 
+      // 当前图像金字塔层相对原图的采样步长。
       const int scale = (1 << level);
 
       VisualPoint *pt = visual_submap->voxel_points[i];
 
       if (pt == nullptr) continue;
 
+      // 将视觉地图点从世界系变换到当前相机系,再投影到当前图像。
       V3D pf = Rcw * pt->pos_ + Pcw;
       pc = cam->world2cam(pf);
 
+      // 计算当前层的整数像素位置及亚像素双线性插值权重。
       const float u_ref = pc[0];
       const float v_ref = pc[1];
       const int u_ref_i = floorf(pc[0] / scale) * scale;
@@ -1469,16 +1504,22 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       const float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
       const float w_ref_br = subpix_u_ref * subpix_v_ref;
 
+      // 读取已经从参考帧变形到当前视角的多层参考图像块。
       vector<float> P = visual_submap->warp_patch[i];
       for (int x = 0; x < patch_size; x++)
       {
+        // 指向当前图像块第 x 行的首个采样像素。
         uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
         for (int y = 0; y < patch_size; ++y, img_ptr += scale)
         {
+          // 当前图像使用双线性插值取灰度,并与对应参考块像素做差得到光度残差。
+          // 与正向组合 updateState 不同,这里不在每次迭代重新计算当前图像梯度。
           double res = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] +
                        w_ref_br * img_ptr[scale * width + scale] - P[patch_size_total * level + x * patch_size + y];
           z(i * patch_size_total + x * patch_size + y) = res;
           patch_error += res * res;
+          // 取出在参考块上预计算的旋转/平移基础雅可比,再根据当前 Rwi、Pwi
+          // 转换为光度残差关于当前 IMU 状态扰动的雅可比。
           MD(1, 3) J_dR = H_sub_inv.block<1, 3>(i * patch_size_total + x * patch_size + y, 0);
           MD(1, 3) J_dt = H_sub_inv.block<1, 3>(i * patch_size_total + x * patch_size + y, 3);
           JdR = J_dR * Rwi + J_dt * P_wi_hat * Rwi;
@@ -1487,58 +1528,107 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
           n_meas++;
         }
       }
+      // 保存每个地图点的图像块误差,供外点判断、地图维护和可视化使用。
       visual_submap->errors[i] = patch_error;
       error += patch_error;
     }
 
+    // 当前次迭代的平均像素平方光度误差,用于决定接受更新还是回退。
     error = error / n_meas;
 
     compute_jacobian_time += omp_get_wtime() - t1;
 
     double t3 = omp_get_wtime();
 
+    // 光度误差没有增大时接受当前线性化点,并继续求解误差状态增量。
     if (error <= last_error)
     {
       old_state = (*state);
       last_error = error;
 
+      // 构造视觉观测信息矩阵 H^T H,并与 state->cov 提供的传播先验融合。
       auto &&H_sub_T = H_sub.transpose();
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
+      // vec 表示当前迭代状态相对 IMU/LIO 传播先验的误差状态。
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-      auto solution = -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+      Matrix<double, DIM_STATE, 1> solution = -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+      applyVisualHandling(solution); // VIO 退化处理(状态应用前)
+      // 将视觉观测求得的误差状态增量注入当前系统状态。
       (*state) += solution;
       auto &&rot_add = solution.block<3, 1>(0, 0);
       auto &&t_add = solution.block<3, 1>(3, 0);
 
+      // 旋转增量小于0.001度且平移增量小于0.001厘米时,认为当前层已经收敛。
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f)) { EKF_end = true; }
     }
     else
     {
+      // 新状态使光度误差增大:恢复上一有效状态并结束当前层迭代。
       (*state) = old_state;
       EKF_end = true;
     }
 
+    // 累加信息矩阵求解和状态更新耗时。
     update_ekf_time += omp_get_wtime() - t3;
 
+    // 收敛、回退或达到迭代上限时结束当前金字塔层优化。
     if (iteration == max_iterations || EKF_end) break; 
   }
 }
 
+// VIO 退化处理:在状态增量应用之前,对不可观的位姿方向做软衰减(默认),并同步投影卡尔曼增益 G
+// 的对应状态行以保持协方差一致性。镜像 LiDAR 侧;门控用上一 VIO 帧的退化标志。默认关闭。
+void VIOManager::applyVisualHandling(Matrix<double, DIM_STATE, 1> &solution)
+{
+  // VIO 处理默认关闭:实测适得其反——跨模态填补需要 VIO 在 LiDAR 退化方向上的"完整"更新,
+  // 抑制 VIO 反而把这份信息去掉、导致漂移。VIO 本身也靠先验自正则(信息少->增益小->更新小)。
+  if (!(degeneracy_detector_.cfg.vio_handling_en && degeneracy_detector_.result.degenerate)) return;
+  bool soft = degeneracy_detector_.cfg.soft_remap;
+  int rm = 0;
+  // 平移(主):把视觉弱约束方向的更新衰减掉,留给下一帧 LiDAR/IMU 承接(协方差保持大 -> 被信任)
+  M3D Pt = degeneracy::degenerateProjection(H_T_H.block<3, 3>(3, 3), degeneracy_detector_.cfg.remap_ratio, soft, &rm);
+  V3D t_inc = Pt * solution.block<3, 1>(3, 0);
+  solution.block<3, 1>(3, 0) = t_inc;
+  if (degeneracy_detector_.cfg.handling_cov_en)
+  {
+    Eigen::Matrix<double, 3, 6> Gt = Pt * G.block<3, 6>(3, 0);
+    G.block<3, 6>(3, 0) = Gt;
+  }
+  if (degeneracy_detector_.cfg.remap_rot_en)
+  {
+    M3D Pr = degeneracy::degenerateProjection(H_T_H.block<3, 3>(0, 0), degeneracy_detector_.cfg.remap_ratio, soft, &rm);
+    V3D r_inc = Pr * solution.block<3, 1>(0, 0);
+    solution.block<3, 1>(0, 0) = r_inc;
+    if (degeneracy_detector_.cfg.handling_cov_en)
+    {
+      Eigen::Matrix<double, 3, 6> Gr = Pr * G.block<3, 6>(0, 0);
+      G.block<3, 6>(0, 0) = Gr;
+    }
+  }
+  vio_remap_applied_ = true;
+}
+
 void VIOManager::updateState(cv::Mat img, int level)
 {
+  // 当前金字塔层没有可参与直接法匹配的视觉地图点时,无需构造观测或更新状态。
   if (total_points == 0) return;
+
+  // 保存本轮迭代前最后一次被接受的状态。若新的光度误差增大,则回退到该状态。
   StatesGroup old_state = (*state);
 
+  // z: 所有图像块像素组成的光度残差向量。
+  // H_sub: 光度残差关于[旋转(3)、平移(3)、逆曝光时间(1)]的雅可比矩阵。
   VectorXd z;
   MatrixXd H_sub;
   bool EKF_end = false;
   float last_error = std::numeric_limits<float>::max();
 
+  // 每个视觉地图点贡献 patch_size_total 个像素观测。
   const int H_DIM = total_points * patch_size_total;
   z.resize(H_DIM);
   z.setZero();
@@ -1547,20 +1637,26 @@ void VIOManager::updateState(cv::Mat img, int level)
 
   for (int iteration = 0; iteration < max_iterations; iteration++)
   {
+    // 统计本次迭代中构造光度残差与雅可比矩阵的耗时。
     double t1 = omp_get_wtime();
 
+    // 根据当前 IMU 世界位姿和相机-IMU外参,构造世界坐标到相机坐标的变换:
+    // p_c = Rcw * p_w + Pcw。
     M3D Rwi(state->rot_end);
     V3D Pwi(state->pos_end);
     Rcw = Rci * Rwi.transpose();
     Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
+    // 相机坐标点对 IMU 世界系平移状态的导数。
     Jdp_dt = Rci * Rwi.transpose();
-    
+
+    // error 累加所有有效图像块的平方光度误差,n_meas 记录有效像素数。
     float error = 0.0;
     int n_meas = 0;
     // int max_threads = omp_get_max_threads();
     // int desired_threads = std::min(max_threads, total_points);
     // omp_set_num_threads(desired_threads);
   
+    // 可选地并行处理各视觉地图点;error 和 n_meas 使用 reduction 保证线程安全。
     #ifdef MP_EN
       omp_set_num_threads(MP_PROC_NUM);
       #pragma omp parallel for reduction(+:error, n_meas)
@@ -1568,11 +1664,14 @@ void VIOManager::updateState(cv::Mat img, int level)
     for (int i = 0; i < total_points; i++)
     {
       // printf("thread is %d, i=%d, i address is %p\n", omp_get_thread_num(), i, &i);
+      // Jimg: 二维图像梯度;Jdpi: 相机投影对三维相机坐标点的雅可比;
+      // JdR/Jdt: 最终光度残差对状态旋转/平移的雅可比。
       MD(1, 2) Jimg;
       MD(2, 3) Jdpi;
       MD(1, 3) Jdphi, Jdp, JdR, Jdt;
 
       float patch_error = 0.0;
+      // level 是当前由粗到细优化的图像金字塔层,search_level 补偿参考块的尺度变化。
       int search_level = visual_submap->search_levels[i];
       int pyramid_level = level + search_level;
       int scale = (1 << pyramid_level);
@@ -1582,13 +1681,16 @@ void VIOManager::updateState(cv::Mat img, int level)
 
       if (pt == nullptr) continue;
 
+      // 将视觉地图点从世界系变换到当前相机系,再投影到图像平面。
       V3D pf = Rcw * pt->pos_ + Pcw;
       V2D pc = cam->world2cam(pf);
 
+      // 构造投影雅可比和相机坐标点的反对称矩阵,供旋转扰动求导使用。
       computeProjectionJacobian(pf, Jdpi);
       M3D p_hat;
       p_hat << SKEW_SYM_MATRX(pf);
 
+      // 找到当前金字塔层的整数采样位置,并计算亚像素双线性插值权重。
       float u_ref = pc[0];
       float v_ref = pc[1];
       int u_ref_i = floorf(pc[0] / scale) * scale;
@@ -1600,15 +1702,19 @@ void VIOManager::updateState(cv::Mat img, int level)
       float w_ref_bl = (1.0 - subpix_u_ref) * subpix_v_ref;
       float w_ref_br = subpix_u_ref * subpix_v_ref;
 
+      // P 是从参考帧变形到当前视角的多层参考图像块;
+      // inv_ref_expo 用于补偿参考帧与当前帧之间的曝光变化。
       vector<float> P = visual_submap->warp_patch[i];
       double inv_ref_expo = visual_submap->inv_expo_list[i];
       // ROS_ERROR("inv_ref_expo: %.3lf, state->inv_expo_time: %.3lf\n", inv_ref_expo, state->inv_expo_time);
 
       for (int x = 0; x < patch_size; x++)
       {
+        // 指向当前图像块第 x 行的首个像素;图像块按金字塔尺度 scale 间隔采样。
         uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * width + u_ref_i - patch_size_half * scale;
         for (int y = 0; y < patch_size; ++y, img_ptr += scale)
         {
+          // 采用中心差分并结合双线性插值,计算当前像素在 u、v 方向的灰度梯度。
           float du =
               0.5f *
               ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] + w_ref_bl * img_ptr[scale * width + scale] +
@@ -1620,6 +1726,9 @@ void VIOManager::updateState(cv::Mat img, int level)
                 w_ref_br * img_ptr[width * scale * 2 + scale]) -
                (w_ref_tl * img_ptr[-scale * width] + w_ref_tr * img_ptr[-scale * width + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
 
+          // 链式求导过程:
+          // 图像梯度 -> 像素坐标 -> 相机三维点 -> IMU旋转/平移状态。
+          // 逆曝光时间和 inv_scale 分别补偿亮度尺度与图像金字塔尺度。
           Jimg << du, dv;
           Jimg = Jimg * state->inv_expo_time;
           Jimg = Jimg * inv_scale;
@@ -1628,23 +1737,30 @@ void VIOManager::updateState(cv::Mat img, int level)
           JdR = Jdphi * Jdphi_dR + Jdp * Jdp_dR;
           Jdt = Jdp * Jdp_dt;
 
+          // 双线性插值得到当前灰度值,并计算曝光补偿后的直接法残差:
+          // r = 当前逆曝光 * 当前灰度 - 参考逆曝光 * 参考灰度。
           double cur_value =
               w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * width] + w_ref_br * img_ptr[scale * width + scale];
           double res = state->inv_expo_time * cur_value - inv_ref_expo * P[patch_size_total * level + x * patch_size + y];
 
           z(i * patch_size_total + x * patch_size + y) = res;
 
+          // 累加当前图像块的平方残差并统计有效像素观测数。
           patch_error += res * res;
           n_meas += 1;
-          
+
+          // 开启曝光估计时填充7维雅可比,最后一维是残差对逆曝光时间的导数;
+          // 否则只填充旋转和平移对应的前6维。
           if (exposure_estimate_en) { H_sub.block<1, 7>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt, cur_value; }
           else { H_sub.block<1, 6>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt; }
         }
       }
+      // 保存单个视觉地图点的图像块误差,供地图点维护和可视化使用。
       visual_submap->errors[i] = patch_error;
       error += patch_error;
     }
 
+    // 计算本次迭代的平均像素平方光度误差,作为更新接受和回退的判断依据。
     error = error / n_meas;
     
     compute_jacobian_time += omp_get_wtime() - t1;
@@ -1657,6 +1773,7 @@ void VIOManager::updateState(cv::Mat img, int level)
 
     double t3 = omp_get_wtime();
 
+    // 只有平均光度误差没有增大时,才接受当前线性化点并求解下一次状态增量。
     if (error <= last_error)
     {
       old_state = (*state);
@@ -1666,6 +1783,8 @@ void VIOManager::updateState(cv::Mat img, int level)
       // vec = (*state_propagat) - (*state); G = K*H;
       // (*state) += (-K*z + vec - G*vec);
 
+      // 在信息形式下构造视觉观测信息矩阵 H^T H。
+      // img_point_cov 表示图像观测噪声,state->cov 提供 IMU/LIO 传播先验。
       auto &&H_sub_T = H_sub.transpose();
       H_T_H.setZero();
       G.setZero();
@@ -1673,27 +1792,35 @@ void VIOManager::updateState(cv::Mat img, int level)
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
       // K = K_1.block<DIM_STATE,6>(0,0) * H_sub_T;
+      // vec 是当前迭代状态相对传播先验的误差,G 是等价的观测增益项。
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
       MD(DIM_STATE, 1)
       solution = -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
+      applyVisualHandling(solution); // VIO 退化处理(状态应用前)
 
+      // 将求得的误差状态增量注入系统状态。
       (*state) += solution;
       auto &&rot_add = solution.block<3, 1>(0, 0);
       auto &&t_add = solution.block<3, 1>(3, 0);
 
       auto &&expo_add = solution.block<1, 1>(6, 0);
       // if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f) && (expo_add.norm() < 0.001f)) EKF_end = true;
+      // 旋转增量小于0.001度且平移增量小于0.001厘米时,认为当前金字塔层收敛。
+      // 当前实际收敛条件没有使用曝光增量 expo_add。
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f))  EKF_end = true;
     }
     else
     {
+      // 更新后光度误差变大:恢复上一有效状态并结束当前层的迭代。
       (*state) = old_state;
       EKF_end = true;
     }
 
+    // 累加本次信息矩阵求解及状态更新耗时。
     update_ekf_time += omp_get_wtime() - t3;
 
+    // 收敛、回退或达到迭代上限后结束当前金字塔层优化。
     if (iteration == max_iterations || EKF_end) break;
   }
   // if (state->inv_expo_time < 0.0)  {ROS_ERROR("reset expo time!!!!!!!!!!\n"); state->inv_expo_time = 0.0;}
@@ -1797,6 +1924,14 @@ void VIOManager::dumpDataForColmap()
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  // 输入参数:
+  //   img      当前相机图像。函数内部可能对其缩放并转为灰度图。
+  //   pg       当前 LiDAR 点及其不确定度,用于补充/生成视觉地图点。
+  //   feat_map LiDAR 体素地图,用于检索可见地图点和更新参考图像块。
+  //   img_time 当前图像时间戳,由上层用于保证 LIO/VIO 时序一致；本函数暂未直接使用。
+
+  // 保证输入图像尺寸与相机模型设置的工作分辨率一致。
+  // img_rgb 保留彩色原图用于着色和 Colmap 输出,img_cp 用于绘制跟踪结果。
   if (width != img.cols || height != img.rows)
   {
     if (img.empty()) printf("[ VIO ] Empty Image!\n");
@@ -1806,43 +1941,58 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   img_cp = img.clone();
   // img_test = img.clone();
 
+  // 直接法使用灰度强度构造光度残差,因此后续 VIO 处理统一使用单通道图像。
   if (img.channels() == 3) cv::cvtColor(img, img, CV_BGR2GRAY);
 
+  // 创建当前图像帧,并将滤波器中的最新位姿、外参等状态同步到该帧。
   new_frame_.reset(new Frame(cam, img));
   updateFrameState(*state);
-  
+
+  // 清空上一帧的图像网格占用信息,为当前帧的特征检索和新点选择做准备。
   resetGrid();
 
+  // t1~t7 用于统计各个 VIO 阶段的耗时。
   double t1 = omp_get_wtime();
 
+  // 将局部体素地图中的候选点投影到当前图像,筛选出视野内且可用于直接法匹配的视觉地图点。
   retrieveFromVisualSparseMap(img, pg, feat_map);
 
   double t2 = omp_get_wtime();
 
+  // 根据参考图像块与当前图像之间的光度残差构造雅可比矩阵,
+  // 并通过迭代误差状态卡尔曼滤波更新系统位姿等状态。
   computeJacobianAndUpdateEKF(img);
 
   double t3 = omp_get_wtime();
 
+  // 从尚未建立视觉观测的 LiDAR 地图点中选择新点,为其创建视觉地图点和参考图像块。
   generateVisualMapPoints(img, pg);
 
   double t4 = omp_get_wtime();
-  
+
+  // 在 img_cp 上绘制当前帧的跟踪结果。该部分只用于显示/调试,不参与状态估计。
   plotTrackedPoints();
 
+  // 调试开关打开时,额外显示参考帧图像块投影到当前帧后的结果。
   if (plot_flag) projectPatchFromRefToCur(feat_map);
 
   double t5 = omp_get_wtime();
 
+  // 更新已被当前帧成功观测的视觉地图点,包括观测次数、视角和图像块等信息。
   updateVisualMapPoints(img);
 
   double t6 = omp_get_wtime();
 
+  // 根据当前观测质量为地图点选择或刷新参考图像块,供后续帧进行直接光度匹配。
   updateReferencePatch(feat_map);
 
   double t7 = omp_get_wtime();
-  
+
+  // 可选地导出当前图像和相机位姿,生成 Colmap 可读取的数据。
   if(colmap_output_en)  dumpDataForColmap();
 
+  // 更新 VIO 处理时间的累计平均值。
+  // 绘图调试阶段(t4~t5)不属于核心算法耗时,因此从总耗时中扣除。
   frame_count++;
   ave_total = ave_total * (frame_count - 1) / frame_count + (t7 - t1 - (t5 - t4)) / frame_count;
 
@@ -1860,6 +2010,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cout << BLUE << "ave_build_residual_time: " << ave_build_residual_time << RESET << endl;
   // cout << BLUE << "ave_ekf_time: " << ave_ekf_time << RESET << endl;
   
+  // 将当前帧各处理阶段耗时输出到终端,同时便于在 terminalLog 中定位性能瓶颈。
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");

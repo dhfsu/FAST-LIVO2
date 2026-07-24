@@ -124,10 +124,11 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
 void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
 {
   bool enable;
-  double cond, scatter, floor_r_lidar, floor_t_lidar, floor_r_vio, floor_t_vio;
+  double cond, cond_rot_thr, scatter, floor_r_lidar, floor_t_lidar, floor_r_vio, floor_t_vio;
   int hyst_on, hyst_off;
   nh.param<bool>("degeneracy/enable", enable, false);
   nh.param<double>("degeneracy/cond_thresh", cond, 100.0);
+  nh.param<double>("degeneracy/cond_thresh_rot", cond_rot_thr, 1000.0);
   nh.param<int>("degeneracy/hysteresis_on", hyst_on, 3);
   nh.param<int>("degeneracy/hysteresis_off", hyst_off, 3);
   nh.param<double>("degeneracy/lidar/lambda_floor_rot", floor_r_lidar, 1e-3);
@@ -135,6 +136,12 @@ void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
   nh.param<double>("degeneracy/lidar/normal_scatter_thresh", scatter, 0.02);
   nh.param<double>("degeneracy/vio/lambda_floor_rot", floor_r_vio, 1e-3);
   nh.param<double>("degeneracy/vio/lambda_floor_trans", floor_t_vio, 1e-3);
+  double vio_alpha;
+  int vio_min_pts;
+  bool vio_handling_en;
+  nh.param<double>("degeneracy/vio/adaptive_alpha", vio_alpha, 0.3);
+  nh.param<int>("degeneracy/vio/min_points", vio_min_pts, 15);
+  nh.param<bool>("degeneracy/vio/handling_en", vio_handling_en, false);
 
   bool adaptive;
   double adaptive_alpha;
@@ -144,8 +151,18 @@ void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
   nh.param<int>("degeneracy/adaptive/window", adaptive_window, 300);
   nh.param<int>("degeneracy/adaptive/min_samples", adaptive_min_samples, 50);
 
+  bool handling_enable;
+  double remap_ratio;
+  bool remap_rot_en, handling_cov_en, soft_remap;
+  nh.param<bool>("degeneracy/handling/enable", handling_enable, false);
+  nh.param<double>("degeneracy/handling/remap_ratio", remap_ratio, 100.0);
+  nh.param<bool>("degeneracy/handling/remap_rot_en", remap_rot_en, false);
+  nh.param<bool>("degeneracy/handling/cov_consistency", handling_cov_en, true);
+  nh.param<bool>("degeneracy/handling/soft_remap", soft_remap, true);
+
   degen_cfg_lidar_.enable = enable;
   degen_cfg_lidar_.cond_thresh = cond;
+  degen_cfg_lidar_.cond_thresh_rot = cond_rot_thr;
   degen_cfg_lidar_.hysteresis_on = hyst_on;
   degen_cfg_lidar_.hysteresis_off = hyst_off;
   degen_cfg_lidar_.lambda_floor_rot = floor_r_lidar;
@@ -155,10 +172,18 @@ void LIVMapper::loadDegeneracyParams(ros::NodeHandle &nh)
   degen_cfg_lidar_.adaptive_alpha = adaptive_alpha;
   degen_cfg_lidar_.adaptive_window = adaptive_window;
   degen_cfg_lidar_.adaptive_min_samples = adaptive_min_samples;
+  degen_cfg_lidar_.handling_enable = handling_enable;
+  degen_cfg_lidar_.remap_ratio = remap_ratio;
+  degen_cfg_lidar_.remap_rot_en = remap_rot_en;
+  degen_cfg_lidar_.handling_cov_en = handling_cov_en;
+  degen_cfg_lidar_.soft_remap = soft_remap;
 
   degen_cfg_vio_ = degen_cfg_lidar_;
   degen_cfg_vio_.lambda_floor_rot = floor_r_vio;
   degen_cfg_vio_.lambda_floor_trans = floor_t_vio;
+  degen_cfg_vio_.vio_adaptive_alpha = vio_alpha;
+  degen_cfg_vio_.vio_min_points = vio_min_pts;
+  degen_cfg_vio_.vio_handling_en = vio_handling_en;
 }
 
 // 将退化识别结果打包成 Float32MultiArray 发布(避免引入自定义 .msg)。
@@ -361,7 +386,9 @@ void LIVMapper::stateEstimationAndMapping()
 
 void LIVMapper::handleVIO() 
 {
+  //将 _state.rot_end 的旋转矩阵转换为欧拉角，并记录到 fout_pre 文件中
   euler_cur = RotMtoEuler(_state.rot_end);
+  //记录的信息包括时间戳、欧拉角（转换为角度格式）、位置、速度、陀螺仪零偏、加速度计零偏和逆曝光时间
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
             << _state.pos_end.transpose() << " " << _state.vel_end.transpose() << " " << _state.bias_g.transpose() << " "
             << _state.bias_a.transpose() << " " << V3D(_state.inv_expo_time, 0, 0).transpose() << std::endl;
@@ -371,7 +398,8 @@ void LIVMapper::handleVIO()
     std::cout << "[ VIO ] No point!!!" << std::endl;
     return;
   }
-    
+  
+  //输出当前待发布的点云中的特征点数量
   std::cout << "[ VIO ] Raw feature num: " << pcl_w_wait_pub->points.size() << std::endl;
 
   if (fabs((LidarMeasures.last_lio_update_time - _first_lidar_time) - plot_time) < (frame_cnt / 2 * 0.1)) 

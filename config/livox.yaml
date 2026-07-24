@@ -47,8 +47,11 @@ imu:
   imu_int_frame: 30
   # acc_cov: 0.5 # 0.2
   # gyr_cov: 0.3 # 0.5
-  acc_cov: 0.08691302 # 0.2
-  gyr_cov: 0.00207299 # 0.5
+  acc_cov: 0.5   # FAST-LIVO2 ESIKF 调好的过程噪声(所有可用配置都用此值)
+  gyr_cov: 0.3
+  # 用户标定的原始噪声密度(过小,滤波器过度信任IMU预测->拒绝LiDAR校正->发散,勿直接用):
+  # acc_cov: 0.08691302
+  # gyr_cov: 0.00207299
   b_acc_cov: 0.0001 # 0.1
   b_gyr_cov: 0.0001 # 0.1
 
@@ -109,11 +112,18 @@ degeneracy:
     lambda_floor_trans: 1.0e-3
     normal_scatter_thresh: 0.02  # warm-up 兜底绝对阈值(自适应模式下仅热身期用)
   vio:
-    lambda_floor_rot: 1.0
-    lambda_floor_trans: 1.0
+    lambda_floor_rot: 1.0e-6      # 设为极小值使绝对下限失效(VIO光度信息尺度任意、不可迁移);盲检测改用点数
+    lambda_floor_trans: 1.0e-6
+    adaptive_alpha: 0.3           # total_points < 0.3*运行中位 -> 判VIO整体弱/盲(自标定、尺度无关)
+    min_points: 15                # 热身/绝对兜底点数下限
   # 自适应相对阈值:scatter 判据改用"低于运行中位数的 alpha 倍"(与传感器无关,一次设定跨数据集通用)
   adaptive:
     enable: true
     alpha: 0.15        # 阈值 = alpha * 运行中位数(实测两 LiDAR 手调值均≈0.15-0.18×中位)
     window: 300        # 滚动窗口帧数
     min_samples: 50    # 热身:样本不足时退回上面的绝对 normal_scatter_thresh
+  # 退化处理:解空间投影(退化置位时把不可观方向从位姿增量投影掉,退回IMU预测)
+  handling:
+    enable: true
+    remap_ratio: 100.0
+    cov_consistency: true   # 退化方向不缩协方差(方向2),保持诚实不确定性以便重定位

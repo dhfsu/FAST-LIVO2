@@ -376,6 +376,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   I_STATE.setIdentity();
 
   bool flg_EKF_inited, flg_EKF_converged, EKF_stop_flg = 0;
+  int remap_rot_dirs = 0, remap_trans_dirs = 0; // 退化处理:上一次迭代投影掉的方向数
+  bool remap_applied = false;
   // ===== IESKF 主迭代循环 =====
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
@@ -471,7 +473,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // 平面参数不确定性在法向方向上的投影
       double sigma_l = J_nq * ptpl_list_[i].plane_var_ * J_nq.transpose();
 
-      // 量测噪声逆(权重)= 1 / (平面不确定性 + 点在法向上的不确定性),0.001 为数值下限
+      // 测量噪声逆(权重)= 1 / (平面不确定性 + 点在法向上的不确定性),0.001 为数值下限
       //三维点协方差 var 需要投影到残差方向。因为残差只关心法向方向
       R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
       // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
@@ -504,6 +506,42 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // 求解状态增量:结合量测项 HTz 与先验约束项
     VD(DIM_STATE)
     solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+
+    // ===== 退化处理:解空间投影(Solution Remapping) =====
+    // 仅在启用处理且已置位退化时:把信息矩阵中不可观的特征方向从位姿增量里投影掉,
+    // 该方向退回 IMU 先验(state_propagat),避免病态观测污染状态、防止发散。
+    if (degeneracy_detector_.cfg.handling_enable && degeneracy_detector_.result.degenerate)
+    {
+      int rm_r = 0, rm_t = 0;
+      bool soft = degeneracy_detector_.cfg.soft_remap;
+      // 平移处理(主):走廊/隧道退化就在平移。soft=按可观性衰减,hard=硬投影(易 runaway)
+      M3D Pt = degeneracy::degenerateProjection(H_T_H.block<3, 3>(3, 3), degeneracy_detector_.cfg.remap_ratio, soft, &rm_t);
+      V3D trans_inc = Pt * solution.block<3, 1>(3, 0);   // 用临时量避免 Eigen 混叠
+      solution.block<3, 1>(3, 0) = trans_inc;
+      // 协方差一致性:同样投影卡尔曼增益 G 的平移状态行,使 P=(I-G)P 在退化方向保留先验不确定性,
+      // 避免滤波器在不可观方向上"过度自信"(出走廊后能更快接受 LiDAR 校正重定位)。
+      if (degeneracy_detector_.cfg.handling_cov_en)
+      {
+        Eigen::Matrix<double, 3, 6> Gt = Pt * G.block<3, 6>(3, 0);
+        G.block<3, 6>(3, 0) = Gt;
+      }
+      // 旋转处理(默认关):旋转信息天然各向异性,cond_r 常态就 100+,投影会误伤朝向->漂移
+      if (degeneracy_detector_.cfg.remap_rot_en)
+      {
+        M3D Pr = degeneracy::degenerateProjection(H_T_H.block<3, 3>(0, 0), degeneracy_detector_.cfg.remap_ratio, soft, &rm_r);
+        V3D rot_inc = Pr * solution.block<3, 1>(0, 0);
+        solution.block<3, 1>(0, 0) = rot_inc;
+        if (degeneracy_detector_.cfg.handling_cov_en)
+        {
+          Eigen::Matrix<double, 3, 6> Gr = Pr * G.block<3, 6>(0, 0);
+          G.block<3, 6>(0, 0) = Gr;
+        }
+      }
+      remap_rot_dirs = rm_r;
+      remap_trans_dirs = rm_t;
+      if (rm_r + rm_t > 0) remap_applied = true;
+    }
+
     int minRow, minCol;
     state_ += solution;  // 更新状态
     auto rot_add = solution.block<3, 1>(0, 0);  // 姿态增量
@@ -547,7 +585,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     if (dr.degenerate)
     {
       std::cout << "\033[1;31m[ LIO Degeneracy ] soft=" << dr.soft_factor << " cond_t=" << dr.cond_trans << " cond_r=" << dr.cond_rot
-                << " scatter_min=" << dr.normal_scatter_min << " trans_dir=[" << dr.trans_degenerate_dir.transpose() << "]\033[0m" << std::endl;
+                << " scatter_min=" << dr.normal_scatter_min << " trans_dir=[" << dr.trans_degenerate_dir.transpose() << "]";
+      if (degeneracy_detector_.cfg.handling_enable)
+        std::cout << " | remap: rot_dirs=" << remap_rot_dirs << " trans_dirs=" << remap_trans_dirs << (remap_applied ? " (APPLIED)" : "");
+      std::cout << "\033[0m" << std::endl;
     }
   }
 

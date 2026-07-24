@@ -123,6 +123,7 @@ public:
   MatrixXd K, H_sub_inv;
 
   degeneracy::DegeneracyDetector degeneracy_detector_; // VIO degeneracy detection (read-only)
+  bool vio_remap_applied_ = false;                      // VIO handling engaged this frame (soft attenuation)
 
   ofstream fout_camera, fout_colmap;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
@@ -144,6 +145,7 @@ public:
   ~VIOManager();
   void updateStateInverse(cv::Mat img, int level);
   void updateState(cv::Mat img, int level);
+  void applyVisualHandling(Matrix<double, DIM_STATE, 1> &solution); // VIO 退化处理:软衰减+协方差一致性(状态应用前)
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
