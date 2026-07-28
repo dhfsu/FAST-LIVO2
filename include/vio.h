@@ -120,7 +120,7 @@ public:
   bool plot_flag;
 
   Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
-  MatrixXd K, H_sub_inv;
+  MatrixXd K, J_sub_inv;
 
   // Degeneracy detection + information-domain attenuation (DCReg-ported).
   degen::DegenParams degen_params_;
