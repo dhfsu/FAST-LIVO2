@@ -12,24 +12,56 @@ which is included as part of this source code package.
 
 #include "voxel_map.h"
 
+//range_inc：固定测距标准差
+//degree_inc：固定方向角标准差
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
+  // 根据激光雷达的距离误差和方向角误差，计算点 pb 在雷达坐标系下的 3×3 协方差。
+  // 误差被分为两部分：沿激光束方向的距离误差，以及垂直于激光束方向的角度误差。
+
+  // 后续构造切平面基向量时需要除以 direction(2)，因此为 z=0 的点设置一个很小的非零值。
+  // 注意：pb 以非 const 引用传入，这里会直接修改调用者中的点坐标。
   if (pb[2] == 0) pb[2] = 0.0001;
+
+  /*
+  这里的噪声模型为：
+  Sigma_p = u * sigma_r^2 * u^T + A * Sigma_omega * A^T
+  */
+  // 点到雷达原点的距离 r，以及距离测量的方差 sigma_r^2。
   float range = sqrt(pb[0] * pb[0] + pb[1] * pb[1] + pb[2] * pb[2]);
   float range_var = range_inc * range_inc;
+
+  // 激光束方向的二维角度扰动协方差。假设两个相互正交的角度扰动彼此独立、方差相同。
+  // sin(degree_inc) 将角度误差转换为单位方向向量在切平面内的扰动尺度。
   Eigen::Matrix2d direction_var;
   direction_var << pow(sin(DEG2RAD(degree_inc)), 2), 0, 0, pow(sin(DEG2RAD(degree_inc)), 2);
+
+  // 激光束的单位方向向量 u = pb / ||pb||。
   Eigen::Vector3d direction(pb);
   direction.normalize();
+
+  // 单位方向 u 的反对称矩阵 [u]x，用于把切平面内的角度扰动映射为三维方向扰动。
   Eigen::Matrix3d direction_hat;
   direction_hat << 0, -direction(2), direction(1), direction(2), 0, -direction(0), -direction(1), direction(0), 0;
+
+  // 在垂直于激光束方向 u 的切平面上构造两个相互正交的单位基向量。
+  // base_vector1 与 u 正交；base_vector2 由 base_vector1 × u 得到。
   Eigen::Vector3d base_vector1(1, 1, -(direction(0) + direction(1)) / direction(2));
   base_vector1.normalize();
   Eigen::Vector3d base_vector2 = base_vector1.cross(direction);
   base_vector2.normalize();
+
+  // N=[n1 n2] 是切平面的 3×2 正交基；二维角度扰动可通过 N 嵌入三维空间。
   Eigen::Matrix<double, 3, 2> N;
   N << base_vector1(0), base_vector2(0), base_vector1(1), base_vector2(1), base_vector1(2), base_vector2(2);
+
+  // 角度扰动到三维点坐标的雅可比 A = r [u]x N。距离越远，同样角度误差引起的位置误差越大。
   Eigen::Matrix<double, 3, 2> A = range * direction_hat * N;
+
+  /*
+  这里的噪声模型为：
+  Sigma_p = u * sigma_r^2 * u^T + A * Sigma_omega * A^T（沿激光束的测距误差和垂直激光束的方向角误差）
+  */
   cov = direction * range_var * direction.transpose() + A * direction_var * A.transpose();
 }
 
@@ -346,10 +378,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   body_cov_list_.clear();
   body_cov_list_.reserve(feats_down_size_);
 
-  // build_residual_time = 0.0;
-  // ekf_time = 0.0;
-  // double t0 = omp_get_wtime();
-
   // 预计算每个点的测量协方差(与状态无关的部分)及其反对称矩阵,循环中复用
   for (size_t i = 0; i < feats_down_body_->size(); i++)
   {
@@ -408,12 +436,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     }
     ptpl_list_.clear();
 
-    // double t1 = omp_get_wtime();
-
     // 为每个点在体素地图中搜索匹配平面,构建点到平面残差列表(OMP 并行)
     BuildResidualListOMP(pv_list_, ptpl_list_);
-
-    // build_residual_time += omp_get_wtime() - t1;
 
     // 统计有效匹配点数与平均残差
     for (int i = 0; i < ptpl_list_.size(); i++)
@@ -421,8 +445,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
-         << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
+    
+    // cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
+    //      << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
     /*** Computation of Measuremnt Jacobian matrix J and measurents covarience
      * ***/
@@ -454,19 +479,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       J_nq.block<1, 3>(0, 3) = -ptpl_list_[i].normal_;              // 对平面法向的偏导
 
       M3D var;
-      // V3D normal_b = state_.rot_end.inverse() * ptpl_list_[i].normal_;
-      // V3D point_b = ptpl_list_[i].point_b_;
-      // double cos_theta = fabs(normal_b.dot(point_b) / point_b.norm());
-      // ptpl_list_[i].body_cov_ = ptpl_list_[i].body_cov_ * (1.0 / cos_theta) * (1.0 / cos_theta);
-
-      // point_w cov
-      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
-      //       state_propagat.cov.block<3, 3>(3, 3) + (-point_crossmat) * state_propagat.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose();
-
-      // point_w cov (another_version)
-      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
-      //       state_propagat.cov.block<3, 3>(3, 3) - point_crossmat * state_propagat.cov.block<3, 3>(0, 0) * point_crossmat;
-
+    
       // point_body cov —— 仅取量测点协方差旋转到世界系
       var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose();
 

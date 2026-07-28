@@ -212,14 +212,14 @@ struct StatesGroup
     this->vel_end = V3D::Zero();
   }
 
-  M3D rot_end;                              // the estimated attitude (rotation matrix) at the end lidar point
-  V3D pos_end;                              // the estimated position at the end lidar point (world frame)
-  V3D vel_end;                              // the estimated velocity at the end lidar point (world frame)
-  double inv_expo_time;                     // the estimated inverse exposure time (no scale)
-  V3D bias_g;                               // gyroscope bias
-  V3D bias_a;                               // accelerator bias
-  V3D gravity;                              // the estimated gravity acceleration
-  Matrix<double, DIM_STATE, DIM_STATE> cov; // states covariance
+  M3D rot_end;                              // 结束时刻的姿态(旋转矩阵,世界系)
+  V3D pos_end;                              // 结束时刻的位置(世界系)
+  V3D vel_end;                              // 结束时刻的速度(世界系)
+  double inv_expo_time;                     // 逆曝光时间(视觉光度用,无量纲)
+  V3D bias_g;                               // 陀螺仪零偏
+  V3D bias_a;                               // 加速度计零偏
+  V3D gravity;                              // 重力加速度估计
+  Matrix<double, DIM_STATE, DIM_STATE> cov; // 状态协方差矩阵
 };
 
 template <typename T>

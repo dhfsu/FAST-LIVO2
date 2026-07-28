@@ -120,7 +120,7 @@ public:
   bool plot_flag;
 
   Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
-  MatrixXd K, H_sub_inv;
+  MatrixXd K, J_sub_inv;
 
   degeneracy::DegeneracyDetector degeneracy_detector_; // VIO degeneracy detection (read-only)
   bool vio_remap_applied_ = false;                      // VIO handling engaged this frame (soft attenuation)
