@@ -94,3 +94,14 @@ pcd_save:
 image_save:
   img_save_en: false
   interval: 1
+
+degeneracy:
+  # DCReg-ported degeneracy detection + information-domain soft attenuation.
+  # See config/avia.yaml for full field documentation. Disabled by default.
+  enable: true
+  lidar_enable: true
+  visual_enable: true
+  diagnostic_only: false
+  cond_threshold: 20.0
+  gate_floor: 0.0
+  verbose: true

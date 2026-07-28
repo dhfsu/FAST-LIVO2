@@ -130,6 +130,8 @@ public:
   vector<double> cameraextrinR;
   double IMG_POINT_COV;
 
+  degen::DegenParams degen_params_; // degeneracy detection/handling config
+
   PointCloudXYZI::Ptr visual_sub_map;
   PointCloudXYZI::Ptr feats_undistort;
   PointCloudXYZI::Ptr feats_down_body;

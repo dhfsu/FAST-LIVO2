@@ -122,6 +122,10 @@ public:
   Matrix<double, DIM_STATE, DIM_STATE> G, H_T_H;
   MatrixXd K, H_sub_inv;
 
+  // Degeneracy detection + information-domain attenuation (DCReg-ported).
+  degen::DegenParams degen_params_;
+  degen::DegenResult last_degen_;
+
   ofstream fout_camera, fout_colmap;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 

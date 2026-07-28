@@ -88,3 +88,17 @@ pcd_save:
 image_save:
   img_save_en: false
   interval: 1
+
+degeneracy:
+  # DCReg-ported degeneracy detection + information-domain soft attenuation.
+  # Detects ill-conditioned pose directions via Schur-complement spectral
+  # analysis on the 6x6 pose information matrix, then attenuates the LiDAR/visual
+  # measurement information along weak axes so the IMU prior / other modality
+  # takes over. Disabled by default (enable=false => no behavior change).
+  enable: false
+  lidar_enable: true       # apply to the LiDAR (voxel_map) update
+  visual_enable: true      # apply to the visual (vio) update
+  diagnostic_only: false   # true: only detect + log, do NOT modify H (A/B compare)
+  cond_threshold: 10.0     # tau: per-axis condition lambda_max/lambda_i above which an axis is degenerate
+  gate_floor: 0.0          # min gate g_i (0 = weak axis can be fully projected out)
+  verbose: false           # per-frame log of degenerate axes / condition numbers

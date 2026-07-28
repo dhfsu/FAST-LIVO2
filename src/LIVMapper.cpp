@@ -117,6 +117,16 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
 
+  // Degeneracy detection + information-domain attenuation (DCReg-ported).
+  // Defaults keep it OFF, so a config without a `degeneracy:` block is a no-op.
+  nh.param<bool>("degeneracy/enable", degen_params_.enable, false);
+  nh.param<bool>("degeneracy/lidar_enable", degen_params_.lidar_enable, true);
+  nh.param<bool>("degeneracy/visual_enable", degen_params_.visual_enable, true);
+  nh.param<bool>("degeneracy/diagnostic_only", degen_params_.diagnostic_only, false);
+  nh.param<double>("degeneracy/cond_threshold", degen_params_.cond_threshold, 10.0);
+  nh.param<double>("degeneracy/gate_floor", degen_params_.gate_floor, 0.0);
+  nh.param<bool>("degeneracy/verbose", degen_params_.verbose, false);
+
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
 
@@ -128,6 +138,7 @@ void LIVMapper::initializeComponents()
 
   voxelmap_manager->extT_ << VEC_FROM_ARRAY(extrinT);
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
+  voxelmap_manager->degen_params_ = degen_params_;
 
   if (!vk::camera_loader::loadFromRosNs("laserMapping", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
 
@@ -148,6 +159,7 @@ void LIVMapper::initializeComponents()
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->exposure_estimate_en = exposure_estimate_en;
   vio_manager->colmap_output_en = colmap_output_en;
+  vio_manager->degen_params_ = degen_params_;
   vio_manager->initializeVIO();
 
   p_imu->set_extrinsic(extT, extR);
@@ -499,6 +511,8 @@ void LIVMapper::handleLIO()
   // printf("\033[1;36m[ LIO mapping time ]: current scan: icp: %0.6f secs, map incre: %0.6f secs, total: %0.6f secs.\033[0m\n"
   //         "\033[1;36m[ LIO mapping time ]: average: icp: %0.6f secs, map incre: %0.6f secs, total: %0.6f secs.\033[0m\n",
   //         t2 - t1, t4 - t3, t4 - t0, aver_time_icp, aver_time_map_inre, aver_time_consu);
+
+#if 0
   // 以表格形式打印各阶段耗时:降采样、ICP、体素地图更新,以及当前帧总耗时和平均总耗时
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m|                         LIO Mapping Time                    |\033[0m\n");
@@ -512,7 +526,7 @@ void LIVMapper::handleLIO()
   printf("\033[1;36m| %-29s | %-27f |\033[0m\n", "Current Total Time", t4 - t0);
   printf("\033[1;36m| %-29s | %-27f |\033[0m\n", "Average Total Time", aver_time_consu);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-
+#endif
   // 记录 LIO 更新后(后验)的状态到日志文件,末尾附上本帧去畸变点数
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_out << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "

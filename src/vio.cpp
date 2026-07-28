@@ -1494,8 +1494,21 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
+      // ===== 退化检测 + 信息域软衰减(DCReg 移植,逆合成路径) =====
+      Eigen::Matrix<double, 6, 6> T_att = Eigen::Matrix<double, 6, 6>::Identity();
+      if (degen_params_.enable && degen_params_.visual_enable)
+      {
+        last_degen_ = degen::DetectPoseDegeneracy(H_T_H.block<6, 6>(0, 0), degen_params_);
+        if (degen_params_.verbose) degen::Log("VIO", last_degen_);
+        if (!degen_params_.diagnostic_only && last_degen_.ok && last_degen_.is_degenerate)
+        {
+          T_att = degen::BuildAttenuationOperator(last_degen_);
+          H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();
+        }
+      }
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
-      auto &&HTz = H_sub_T * z;
+      Eigen::Matrix<double, 6, 1> HTz = H_sub_T * z;
+      HTz = T_att * HTz;  // 右端项同步衰减(与左端同一 T),缺省 T=I 无副作用
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
       auto solution = -K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
@@ -1658,8 +1671,23 @@ void VIOManager::updateState(cv::Mat img, int level)
       H_T_H.setZero();
       G.setZero();
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
+      // ===== 退化检测 + 信息域软衰减(DCReg 移植) =====
+      // 仅对左上 6x6 位姿块(rot+trans)操作;第 7 维曝光是标量 nuisance,不参与
+      // 几何退化,其行/列耦合项保持不变。同一算子 T 同步作用于 H 与 HTz 的位姿部分。
+      Eigen::Matrix<double, 6, 6> T_att = Eigen::Matrix<double, 6, 6>::Identity();
+      if (degen_params_.enable && degen_params_.visual_enable)
+      {
+        last_degen_ = degen::DetectPoseDegeneracy(H_T_H.block<6, 6>(0, 0), degen_params_);
+        if (degen_params_.verbose) degen::Log("VIO", last_degen_);
+        if (!degen_params_.diagnostic_only && last_degen_.ok && last_degen_.is_degenerate)
+        {
+          T_att = degen::BuildAttenuationOperator(last_degen_);
+          H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();
+        }
+      }
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
-      auto &&HTz = H_sub_T * z;
+      Eigen::Matrix<double, 7, 1> HTz = H_sub_T * z;
+      HTz.head<6>() = T_att * HTz.head<6>().eval();  // 仅衰减位姿部分,曝光维不动
       // K = K_1.block<DIM_STATE,6>(0,0) * H_sub_T;
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
@@ -1848,6 +1876,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   // cout << BLUE << "ave_build_residual_time: " << ave_build_residual_time << RESET << endl;
   // cout << BLUE << "ave_ekf_time: " << ave_ekf_time << RESET << endl;
   
+#if 0
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
   printf("\033[1;34m|                         VIO Time                            |\033[0m\n");
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
@@ -1866,7 +1895,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Current Total Time", t7 - t1 - (t5 - t4));
   printf("\033[1;32m| %-29s | %-27lf |\033[0m\n", "Average Total Time", ave_total);
   printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
-
+#endif
   // std::string text = std::to_string(int(1 / (t7 - t1 - (t5 - t4)))) + " HZ";
   // cv::Point2f origin;
   // origin.x = 20;

@@ -419,8 +419,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       total_residual += fabs(ptpl_list_[i].dis_to_plane_);
     }
     effct_feat_num_ = ptpl_list_.size();
-    cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
-         << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
+    
+    // cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_
+    //      << " effective feature num: " << effct_feat_num_ << " average residual: " << total_residual / effct_feat_num_ << endl;
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents covarience
      * ***/
@@ -452,18 +453,6 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       J_nq.block<1, 3>(0, 3) = -ptpl_list_[i].normal_;              // 对平面法向的偏导
 
       M3D var;
-      // V3D normal_b = state_.rot_end.inverse() * ptpl_list_[i].normal_;
-      // V3D point_b = ptpl_list_[i].point_b_;
-      // double cos_theta = fabs(normal_b.dot(point_b) / point_b.norm());
-      // ptpl_list_[i].body_cov_ = ptpl_list_[i].body_cov_ * (1.0 / cos_theta) * (1.0 / cos_theta);
-
-      // point_w cov
-      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
-      //       state_propagat.cov.block<3, 3>(3, 3) + (-point_crossmat) * state_propagat.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose();
-
-      // point_w cov (another_version)
-      // var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose() +
-      //       state_propagat.cov.block<3, 3>(3, 3) - point_crossmat * state_propagat.cov.block<3, 3>(0, 0) * point_crossmat;
 
       // point_body cov —— 仅取量测点协方差旋转到世界系
       var = state_propagat.rot_end * extR_ * ptpl_list_[i].body_cov_ * (state_propagat.rot_end * extR_).transpose();
@@ -490,9 +479,29 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     // ===== 迭代卡尔曼滤波量测更新 =====
     MatrixXd K(DIM_STATE, effct_feat_num_);
     // auto &&Hsub_T = Hsub.transpose();  测量残差修正 HT*z=H^T*R^-1(-z_k)
-    auto &&HTz = Hsub_T_R_inv * meas_vec;         // H^T R^-1 z
+    Eigen::Matrix<double, 6, 1> HTz = Hsub_T_R_inv * meas_vec;  // H^T R^-1 z (物化为可修改的 6x1)
     // fout_dbg<<"HTz: "<<HTz<<endl;
     H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;  // H^T R^-1 H(信息矩阵)
+    // ===== 退化检测 + 信息域软衰减(DCReg 移植) =====
+    // 在纯测量信息矩阵(先验尚未加入)上做 Schur 补退化检测,沿不可观方向削弱
+    // 测量信息,使卡尔曼增益在弱轴趋零、由 IMU 先验接管。同一算子 T 必须同时作用于
+    // 信息矩阵 H 与信息向量 HTz(否则弱轴梯度未衰减会导致巨大跳变发散)。
+    if (degen_params_.enable && degen_params_.lidar_enable)
+    {
+      last_degen_ = degen::DetectPoseDegeneracy(H_T_H.block<6, 6>(0, 0), degen_params_);
+      if (degen_params_.verbose)
+      {
+        std::cout << "[ DEGEN ][LIO] frame_points=（降采样）" << feats_down_body_->size()
+                  << " effective_points（成功匹配平面）=" << effct_feat_num_ << std::endl;
+        degen::Log("LIO", last_degen_);
+      }
+      if (!degen_params_.diagnostic_only && last_degen_.ok && last_degen_.is_degenerate)
+      {
+        const Eigen::Matrix<double, 6, 6> T_att = degen::BuildAttenuationOperator(last_degen_);
+        H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();
+        HTz = T_att * HTz;  // 右端项同步衰减(与左端同一 T)
+      }
+    }
     // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
     // 卡尔曼增益中间量 K_1 = (H^T R^-1 H + P^-1)^-1
     //MD是a行b列的矩阵，VD是a维的列向量，M3D是3行3列的矩阵，V3D是3维的列向量
@@ -529,22 +538,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
 
-      // VD(DIM_STATE) K_sum  = K.rowwise().sum();
-      // VD(DIM_STATE) P_diag = _state.cov.diagonal();
       EKF_stop_flg = true;
     }
     if (EKF_stop_flg) break;
   }
-
-  // double t2 = omp_get_wtime();
-  // scan_count++;
-  // ekf_time = t2 - t0 - build_residual_time;
-
-  // ave_build_residual_time = ave_build_residual_time * (scan_count - 1) / scan_count + build_residual_time / scan_count;
-  // ave_ekf_time = ave_ekf_time * (scan_count - 1) / scan_count + ekf_time / scan_count;
-
-  // cout << "[ Mapping ] ekf_time: " << ekf_time << "s, build_residual_time: " << build_residual_time << "s" << endl;
-  // cout << "[ Mapping ] ave_ekf_time: " << ave_ekf_time << "s, ave_build_residual_time: " << ave_build_residual_time << "s" << endl;
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
