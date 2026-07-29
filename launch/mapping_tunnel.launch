@@ -1,0 +1,21 @@
+<launch>
+  <!-- Tunnel 数据集（Livox + 左目针孔相机）启动文件。 -->
+
+  <arg name="rviz" default="true" />
+
+  <rosparam command="load" file="$(find fast_livo)/config/Tunnel.yaml" />
+
+  <!-- 输入为 /left_camera/image/compressed，解压后发布 sensor_msgs/Image。 -->
+  <node pkg="image_transport" type="republish" name="tunnel_image_republish"
+        args="compressed in:=/left_camera/image raw out:=/left_camera/image"
+        output="screen" respawn="true" />
+
+  <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
+    <rosparam file="$(find fast_livo)/config/camera_Tunnel.yaml" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  </group>
+</launch>

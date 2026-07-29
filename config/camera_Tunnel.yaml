@@ -1,0 +1,19 @@
+# Tunnel 数据集左目相机参数，来源：gamma_config.yaml。
+cam_model: Pinhole
+cam_width: 1224
+cam_height: 1024
+scale: 1.0
+
+cam_fx: 1174.433772943354
+cam_fy: 1174.477432586343
+cam_cx: 602.0977604990142
+cam_cy: 506.2372585153649
+
+# OpenCV radial-tangential 顺序：k1、k2、p1、p2。
+cam_d0: -0.058079349939181
+cam_d1: 0.134502746395860
+cam_d2: 1.310282988798364e-05
+cam_d3: 6.216594495554388e-04
+
+# gamma_config.yaml 还提供 k3=-0.067349697730475，当前 vikit ROS
+# 相机加载器未读取第五个畸变参数，因此暂不传入。

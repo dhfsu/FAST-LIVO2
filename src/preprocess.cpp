@@ -15,7 +15,8 @@ which is included as part of this source code package.
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
-Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+Preprocess::Preprocess()
+    : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1), odin1_confidence_threshold(30)
 {
   inf_bound = 10;
   N_SCANS = 6;
@@ -83,6 +84,10 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
 
   case ROBOSENSE:
     robosense_handler(msg);
+    break;
+
+  case ODIN1:
+    odin1_handler(msg);
     break;
 
   default:
@@ -738,6 +743,49 @@ void Preprocess::robosense_handler(const sensor_msgs::PointCloud2::ConstPtr &msg
     added_pt.curvature = (pt.timestamp - time_head) * 1000.0;
     pl_surf.points.push_back(added_pt);
   }
+  std::sort(pl_surf.points.begin(), pl_surf.points.end(), [](const PointType &a, const PointType &b) {
+    return a.curvature < b.curvature;
+  });
+}
+
+void Preprocess::odin1_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<odin1_ros::Point> pl_orig;
+  pcl::fromROSMsg(*msg, pl_orig);
+  pl_surf.reserve(pl_orig.size());
+
+  for (std::size_t i = 0; i < pl_orig.size(); ++i)
+  {
+    if (i % point_filter_num != 0) continue;
+
+    const auto &pt = pl_orig.points[i];
+    const double dist_sqr = static_cast<double>(pt.x) * pt.x + static_cast<double>(pt.y) * pt.y +
+                            static_cast<double>(pt.z) * pt.z;
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z) ||
+        !std::isfinite(pt.offset_time) || pt.offset_time < 0.0f || dist_sqr < blind_sqr ||
+        pt.confidence < odin1_confidence_threshold)
+    {
+      continue;
+    }
+
+    PointType added_pt;
+    added_pt.x = pt.x;
+    added_pt.y = pt.y;
+    added_pt.z = pt.z;
+    added_pt.intensity = static_cast<float>(pt.intensity);
+    added_pt.normal_x = 0.0f;
+    added_pt.normal_y = 0.0f;
+    added_pt.normal_z = 0.0f;
+    // Odin1 的 offset_time 单位为秒；FAST-LIVO2 使用 curvature 保存毫秒时间偏移。
+    added_pt.curvature = pt.offset_time * 1000.0f;
+    pl_surf.push_back(added_pt);
+  }
+
+  // 后续代码使用最后一个点的时间偏移计算扫描结束时刻，因此确保点按时间排列。
   std::sort(pl_surf.points.begin(), pl_surf.points.end(), [](const PointType &a, const PointType &b) {
     return a.curvature < b.curvature;
   });

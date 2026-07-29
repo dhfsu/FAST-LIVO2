@@ -95,6 +95,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<int>("preprocess/lidar_type", p_pre->lidar_type, AVIA);
   nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 6);
   nh.param<int>("preprocess/point_filter_num", p_pre->point_filter_num, 3);
+  nh.param<int>("preprocess/odin1_confidence_threshold", p_pre->odin1_confidence_threshold, 30);
   nh.param<bool>("preprocess/feature_extract_enabled", p_pre->feature_enabled, false);
 
   nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
@@ -768,6 +769,12 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
   // ROS_INFO("get point cloud at time: %.6f", msg->header.stamp.toSec());
   PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
   p_pre->process(msg, ptr);
+  if (!ptr || ptr->empty())
+  {
+    ROS_ERROR("Received an empty point cloud after preprocessing");
+    mtx_buffer.unlock();
+    return;
+  }
   lid_raw_data_buffer.push_back(ptr);
   lid_header_time_buffer.push_back(cur_head_time);
   last_timestamp_lidar = cur_head_time;

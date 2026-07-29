@@ -147,6 +147,25 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(robosense_ros::Point,
                                   (float, x, x)(float, y, y)(float, z, z)(float, intensity, intensity)(double, timestamp, timestamp)(std::uint16_t, ring, ring))
 /*****************/
 
+/*** Odin1 ***/
+namespace odin1_ros
+{
+struct EIGEN_ALIGN16 Point
+{
+  float x;
+  float y;
+  float z;
+  std::uint8_t intensity;
+  std::uint16_t confidence;
+  float offset_time;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+} // namespace odin1_ros
+POINT_CLOUD_REGISTER_POINT_STRUCT(odin1_ros::Point,
+                                  (float, x, x)(float, y, y)(float, z, z)(std::uint8_t, intensity, intensity)
+                                  (std::uint16_t, confidence, confidence)(float, offset_time, offset_time))
+/*************/
+
 class Preprocess
 {
 public:
@@ -163,7 +182,7 @@ public:
   PointCloudXYZI pl_full, pl_corn, pl_surf;
   PointCloudXYZI pl_buff[128]; // maximum 128 line lidar
   vector<orgtype> typess[128]; // maximum 128 line lidar
-  int lidar_type, point_filter_num, N_SCANS;
+  int lidar_type, point_filter_num, N_SCANS, odin1_confidence_threshold;
   
   double blind, blind_sqr;
   bool feature_enabled, given_offset_time;
@@ -176,6 +195,7 @@ private:
   void xt32_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void Pandar128_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void robosense_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
+  void odin1_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void l515_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);
   void pub_func(PointCloudXYZI &pl, const ros::Time &ct);

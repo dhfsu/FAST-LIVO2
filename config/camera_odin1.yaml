@@ -1,0 +1,14 @@
+cam_model: Pinhole
+cam_width: 1600
+cam_height: 1296
+scale: 1.0
+cam_fx: 737.96613595404403
+cam_fy: 738.337575483608
+cam_cx: 774.98906720636205
+cam_cy: 633.93873803262476
+
+# 输入图像已经去畸变，因此不再应用原始 FishPoly 畸变参数。
+cam_d0: 0.0
+cam_d1: 0.0
+cam_d2: 0.0
+cam_d3: 0.0

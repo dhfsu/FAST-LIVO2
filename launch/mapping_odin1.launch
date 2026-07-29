@@ -1,0 +1,15 @@
+<launch>
+  <!-- Odin1（Livox Avia + 已去畸变图像）启动文件。 -->
+
+  <arg name="rviz" default="true" />
+
+  <rosparam command="load" file="$(find fast_livo)/config/odin1.yaml" />
+
+  <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
+    <rosparam file="$(find fast_livo)/config/camera_odin1.yaml" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  </group>
+</launch>
