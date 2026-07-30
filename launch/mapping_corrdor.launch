@@ -3,7 +3,7 @@
 
   <arg name="rviz" default="true" />
 
-  <rosparam command="load" file="$(find fast_livo)/config/livox.yaml" />
+  <rosparam command="load" file="$(find fast_livo)/config/corridor.yaml" />
 
   <!-- Bag只有压缩图像(sensor_msgs/CompressedImage);FAST-LIVO2订阅原始sensor_msgs/Image,
        故用image_transport republish在线解压到 /camera/color/image_decompressed -->
@@ -13,7 +13,7 @@
   </node>
 
   <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
-    <rosparam file="$(find fast_livo)/config/livox_camera.yaml" />
+    <rosparam file="$(find fast_livo)/config/corridor_camera.yaml" />
   </node>
 
   <group if="$(arg rviz)">

@@ -102,6 +102,6 @@ degeneracy:
   lidar_enable: true
   visual_enable: true
   diagnostic_only: false
-  cond_threshold: 20.0
+  cond_threshold: 10.0
   gate_floor: 0.0
   verbose: true
