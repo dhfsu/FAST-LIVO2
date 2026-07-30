@@ -210,6 +210,11 @@ public:
   // Degeneracy detection + information-domain attenuation (DCReg-ported).
   degen::DegenParams degen_params_;
   degen::DegenResult last_degen_;
+  // True when THIS frame's LIO measurement was fully suppressed (rank collapse
+  // or all 6 pose axes degenerate) => the LIO update effectively did nothing and
+  // the state stayed at the IMU prior. LIVMapper uses this to defer inserting the
+  // scan into the voxel map until the VIO update refines the pose.
+  bool lio_full_degenerate_ = false;
 
   V3D last_slide_position = {0,0,0};
 

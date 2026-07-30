@@ -1487,7 +1487,7 @@ void VIOManager::updateStateInverse(cv::Mat img, int level)
       {
         last_degen_ = degen::DetectPoseDegeneracy(H_T_H.block<6, 6>(0, 0), degen_params_);
         if (degen_params_.verbose) degen::Log("VIO", last_degen_);
-        if (!degen_params_.diagnostic_only && last_degen_.ok && last_degen_.is_degenerate)
+        if (!degen_params_.diagnostic_only && last_degen_.is_degenerate)
         {
           T_att = degen::BuildAttenuationOperator(last_degen_);
           H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();
@@ -1664,7 +1664,7 @@ void VIOManager::updateState(cv::Mat img, int level)
       {
         last_degen_ = degen::DetectPoseDegeneracy(H_T_H.block<6, 6>(0, 0), degen_params_);
         if (degen_params_.verbose) degen::Log("VIO", last_degen_);
-        if (!degen_params_.diagnostic_only && last_degen_.ok && last_degen_.is_degenerate)
+        if (!degen_params_.diagnostic_only && last_degen_.is_degenerate)
         {
           T_att = degen::BuildAttenuationOperator(last_degen_);
           H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();

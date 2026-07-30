@@ -298,7 +298,29 @@ void LIVMapper::stateEstimationAndMapping()
   }
 }
 
-void LIVMapper::handleVIO() 
+void LIVMapper::commitLidarToMap()
+{
+  // 用当前 _state 位姿把本帧降采样点云投到世界系、计算每点协方差并融入体素地图。
+  // 由正常 LIO 路径与"完全退化帧延后到 VIO 之后"两处共用。
+  PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
+  transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
+  if (voxelmap_manager->pv_list_.size() != world_lidar->points.size()) return;  // 防御:尺寸不匹配则跳过
+  for (size_t i = 0; i < world_lidar->points.size(); i++)
+  {
+    voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
+    M3D point_crossmat = voxelmap_manager->cross_mat_list_[i];  // 点坐标的反对称矩阵
+    M3D var = voxelmap_manager->body_cov_list_[i];              // 点在雷达系下的测量协方差
+    // 协方差传播:测量噪声(经外参与姿态旋转) + 姿态不确定性 + 位置不确定性
+    var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
+          (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
+    voxelmap_manager->pv_list_[i].var = var;
+  }
+  voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
+  std::cout << "[ LIO ] Update Voxel Map" << std::endl;
+  _pv_list = voxelmap_manager->pv_list_;
+}
+
+void LIVMapper::handleVIO()
 {
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
@@ -323,6 +345,14 @@ void LIVMapper::handleVIO()
   }
 
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list, voxelmap_manager->voxel_map_, LidarMeasures.last_lio_update_time - _first_lidar_time);
+
+  // 若上一 LIO 帧因完全退化被延后建图,此时 _state 已被 VIO refine,用它把那帧插入地图。
+  if (defer_lidar_insert_)
+  {
+    commitLidarToMap();
+    defer_lidar_insert_ = false;
+    std::cout << "[ VIO ] committed deferred degenerate scan with VIO-refined pose" << std::endl;
+  }
 
   if (imu_prop_enable)
   {
@@ -367,6 +397,15 @@ void LIVMapper::handleLIO()
   {
     std::cout << "[ LIO ]: No point!!!" << std::endl;
     return;
+  }
+
+  // 边界保护:上一帧退化被延后,但直到现在都没有 VIO 来 refine(极少见)。
+  // 在下面覆盖 feats_down_body 与体素协方差列表之前,用当前最优位姿先把那帧补插进地图。
+  if (defer_lidar_insert_)
+  {
+    commitLidarToMap();
+    defer_lidar_insert_ = false;
+    std::cout << "[ LIO ] flushed deferred scan (no VIO arrived) with current pose" << std::endl;
   }
 
   double t0 = omp_get_wtime();  // 计时起点
@@ -451,24 +490,17 @@ void LIVMapper::handleLIO()
 
   double t3 = omp_get_wtime();  // 发布里程计结束,开始更新体素地图
 
-  // 用更新后的位姿把降采样点云重新投到世界坐标系,并为每个点计算其世界坐标下的协方差
-  PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
-  transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
-  for (size_t i = 0; i < world_lidar->points.size(); i++)
+  // 完全退化时(仅 LIVO 模式):此时 _state 仅为 IMU 先验,用它建图会污染体素平面。
+  // 延后到下一个 handleVIO 用 refine 后的位姿再插入本帧点云。
+  if (slam_mode_ == LIVO && voxelmap_manager->lio_full_degenerate_)
   {
-    //这个pv_list是带协方差的点列表
-    voxelmap_manager->pv_list_[i].point_w << world_lidar->points[i].x, world_lidar->points[i].y, world_lidar->points[i].z;
-    M3D point_crossmat = voxelmap_manager->cross_mat_list_[i];  // 点坐标的反对称矩阵
-    M3D var = voxelmap_manager->body_cov_list_[i];              // 点在雷达系下的测量协方差
-    // 协方差传播:测量噪声(经外参与姿态旋转) + 姿态不确定性 + 位置不确定性
-    var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
-          (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
-    voxelmap_manager->pv_list_[i].var = var;
+    defer_lidar_insert_ = true;
+    std::cout << "[ LIO ] fully degenerate -> defer map insertion until post-VIO pose" << std::endl;
   }
-  // 将带协方差的新点增量式地融入体素地图,更新各体素内的平面参数
-  voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
-  std::cout << "[ LIO ] Update Voxel Map" << std::endl;
-  _pv_list = voxelmap_manager->pv_list_;
+  else
+  {
+    commitLidarToMap();  // 正常:用当前(LIO 后验)位姿把本帧插入地图
+  }
 
   double t4 = omp_get_wtime();  // 体素地图更新结束
 

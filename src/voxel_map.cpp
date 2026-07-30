@@ -84,47 +84,63 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<double>("local_map/sliding_thresh", voxel_config.sliding_thresh, 8);
 }
 
+// 用体素内的一组带方差的点拟合平面(PCA)，并给出平面参数的不确定度。
+// points: 体素内的点，point_w 为世界系坐标，var 为该点 3×3 的位置协方差
+// plane : 输出的平面结构，法向 n 取自最小特征值对应的特征向量，中心 q 为质心
+// 平面参数按 (n, q) 排成 6 维向量，其协方差存入 plane->plane_var_(6×6)
 void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPlane *plane)
 {
+  // 每次重新拟合前清零累加量，避免残留上一次的结果
   plane->plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
   plane->covariance_ = Eigen::Matrix3d::Zero();
   plane->center_ = Eigen::Vector3d::Zero();
   plane->normal_ = Eigen::Vector3d::Zero();
   plane->points_size_ = points.size();
   plane->radius_ = 0;
+  // 一次遍历累加二阶矩 sum(p*p^T) 与一阶矩 sum(p)
   for (auto pv : points)
   {
     plane->covariance_ += pv.point_w * pv.point_w.transpose();
     plane->center_ += pv.point_w;
   }
+  // 质心 q = sum(p)/N；点云协方差 A = sum(p*p^T)/N - q*q^T
+  // 该式等价于 sum((p-q)(p-q)^T)/N，好处是只需一次遍历累加 sum(p) 与 sum(p*p^T)
   plane->center_ = plane->center_ / plane->points_size_;
   plane->covariance_ = plane->covariance_ / plane->points_size_ - plane->center_ * plane->center_.transpose();
+  // 对协方差做特征分解：特征值反映三个主方向上的离散程度
   Eigen::EigenSolver<Eigen::Matrix3d> es(plane->covariance_);
   Eigen::Matrix3cd evecs = es.eigenvectors();
   Eigen::Vector3cd evals = es.eigenvalues();
   Eigen::Vector3d evalsReal;
-  evalsReal = evals.real();
+  evalsReal = evals.real(); // 实对称矩阵，特征值/向量的虚部为 0，只取实部
+  // 找出最小/最大特征值的下标，中间那个用 3-min-max 得到(下标和恒为 0+1+2=3)
   Eigen::Matrix3f::Index evalsMin, evalsMax;
   evalsReal.rowwise().sum().minCoeff(&evalsMin);
   evalsReal.rowwise().sum().maxCoeff(&evalsMax);
   int evalsMid = 3 - evalsMin - evalsMax;
+  // 最小特征向量 = 平面法向；中/大特征向量张成平面本身(此处仅取出备用)
   Eigen::Vector3d evecMin = evecs.real().col(evalsMin);
   Eigen::Vector3d evecMid = evecs.real().col(evalsMid);
   Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
+  // 质心对单点的雅可比 dq/dp_i = (1/N) I，与 i 无关，循环外算一次
   Eigen::Matrix3d J_Q;
   J_Q << 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_, 0, 0, 0, 1.0 / plane->points_size_;
   // && evalsReal(evalsMid) > 0.05
   //&& evalsReal(evalsMid) > 0.01
+  // 最小特征值足够小 => 点在法向上几乎没有厚度，认为构成平面
   if (evalsReal(evalsMin) < planer_threshold_)
   {
+    // 逐点传播测量噪声到平面参数：plane_var_ = sum_i J_i * var_i * J_i^T
     for (int i = 0; i < points.size(); i++)
     {
-      Eigen::Matrix<double, 6, 3> J;
-      Eigen::Matrix3d F;
+      Eigen::Matrix<double, 6, 3> J; // 平面参数(n,q) 对第 i 个点的 6×3 雅可比
+      Eigen::Matrix3d F;             // 法向在特征向量基下的扰动系数矩阵
       for (int m = 0; m < 3; m++)
       {
         if (m != (int)evalsMin)
         {
+          // 特征向量的一阶摄动公式：dn 沿其余特征向量 u_m 的分量，
+          // 系数含 1/(lambda_min - lambda_m)，即特征值越接近，法向越不稳定
           Eigen::Matrix<double, 1, 3> F_m =
               (points[i].point_w - plane->center_).transpose() / ((plane->points_size_) * (evalsReal[evalsMin] - evalsReal[m])) *
               (evecs.real().col(m) * evecs.real().col(evalsMin).transpose() + evecs.real().col(evalsMin) * evecs.real().col(m).transpose());
@@ -132,26 +148,30 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
         }
         else
         {
+          // 法向自身方向的扰动只改变模长，对单位法向无贡献，置零
           Eigen::Matrix<double, 1, 3> F_m;
           F_m << 0, 0, 0;
           F.row(m) = F_m;
         }
       }
-      J.block<3, 3>(0, 0) = evecs.real() * F;
-      J.block<3, 3>(3, 0) = J_Q;
+      J.block<3, 3>(0, 0) = evecs.real() * F; // 上 3 行：dn/dp_i(把基下系数转回世界系)
+      J.block<3, 3>(3, 0) = J_Q;              // 下 3 行：dq/dp_i
       plane->plane_var_ += J * points[i].var * J.transpose();
     }
 
+    // 记录平面的三个正交主方向：normal_ 为法向，x/y_normal_ 为平面内两个方向
     plane->normal_ << evecs.real()(0, evalsMin), evecs.real()(1, evalsMin), evecs.real()(2, evalsMin);
     plane->y_normal_ << evecs.real()(0, evalsMid), evecs.real()(1, evalsMid), evecs.real()(2, evalsMid);
     plane->x_normal_ << evecs.real()(0, evalsMax), evecs.real()(1, evalsMax), evecs.real()(2, evalsMax);
     plane->min_eigen_value_ = evalsReal(evalsMin);
     plane->mid_eigen_value_ = evalsReal(evalsMid);
     plane->max_eigen_value_ = evalsReal(evalsMax);
-    plane->radius_ = sqrt(evalsReal(evalsMax));
+    plane->radius_ = sqrt(evalsReal(evalsMax)); // 用最大主方向的标准差近似平面尺寸(可视化用)
+    // 平面方程 n·p + d = 0，代入质心解出 d = -n·q
     plane->d_ = -(plane->normal_(0) * plane->center_(0) + plane->normal_(1) * plane->center_(1) + plane->normal_(2) * plane->center_(2));
     plane->is_plane_ = true;
-    plane->is_update_ = true;
+    plane->is_update_ = true; // 标记本帧已更新，供地图发布/可视化使用
+    // 首次成为平面时分配全局唯一 id
     if (!plane->is_init_)
     {
       plane->id_ = voxel_plane_id;
@@ -161,6 +181,7 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   }
   else
   {
+    // 点太发散，不构成平面；上层据此把体素继续切分为子八叉树节点
     plane->is_update_ = true;
     plane->is_plane_ = false;
   }
@@ -518,7 +539,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
                   << " effective_points（成功匹配平面）=" << effct_feat_num_ << std::endl;
         degen::Log("LIO", last_degen_);
       }
-      if (!degen_params_.diagnostic_only && last_degen_.ok && last_degen_.is_degenerate)
+      // 只要判为退化(含 ok=false 的秩亏全跳过)即施加;不再要求 ok==true,
+      // 否则最严重的秩亏情形反而不做任何处理。
+      if (!degen_params_.diagnostic_only && last_degen_.is_degenerate)
       {
         const Eigen::Matrix<double, 6, 6> T_att = degen::BuildAttenuationOperator(last_degen_);
         H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();
@@ -565,6 +588,15 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     }
     if (EKF_stop_flg) break;
   }
+
+  // 标记本帧 LIO 是否"完全退化"(仅在启用衰减且非诊断模式时):秩亏(ok=false)
+  // 或六个位姿轴全部退化 => 该模态本帧基本没更新、状态停在 IMU 先验。
+  // LIVMapper 据此把本帧点云的建图延后到 VIO refine 位姿之后。
+  lio_full_degenerate_ =
+      degen_params_.enable && degen_params_.lidar_enable && !degen_params_.diagnostic_only &&
+      last_degen_.is_degenerate &&
+      (!last_degen_.ok ||
+       std::all_of(last_degen_.mask.begin(), last_degen_.mask.end(), [](bool b) { return b; }));
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,

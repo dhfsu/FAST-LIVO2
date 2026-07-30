@@ -35,6 +35,10 @@ public:
   void stateEstimationAndMapping();
   void handleVIO();
   void handleLIO();
+  // Insert the current LIO frame (feats_down_body + voxelmap covariance lists)
+  // into the voxel map using the current _state pose. Shared by the normal LIO
+  // path and the deferred (post-VIO) insertion of a fully-degenerate frame.
+  void commitLidarToMap();
   void savePCD();
   void processImu();
   
@@ -131,6 +135,10 @@ public:
   double IMG_POINT_COV;
 
   degen::DegenParams degen_params_; // degeneracy detection/handling config
+  // When a LIO frame is fully degenerate, defer inserting it into the voxel map
+  // until the next VIO update refines the pose (avoids polluting the map with the
+  // unreliable IMU-prior pose).
+  bool defer_lidar_insert_ = false;
 
   PointCloudXYZI::Ptr visual_sub_map;
   PointCloudXYZI::Ptr feats_undistort;

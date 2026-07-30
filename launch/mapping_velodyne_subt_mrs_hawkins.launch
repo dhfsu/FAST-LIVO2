@@ -2,6 +2,34 @@
   <!-- Launch file for the SubT MRS Hawkins Long Corridor dataset. -->
 
   <arg name="rviz" default="true" />
+  <!-- 是否内置两个数据转换节点(bag 里是原始 velodyne 包 + MEI 原始图时需要开) -->
+  <arg name="convert" default="true" />
+
+  <!-- 原始 velodyne 包 -> 点云: 订阅 /velodyne_packets, 发布 /velodyne_points -->
+  <!-- noetic 里由 TransformNodelet 完成(跑在 nodelet manager 内);
+       fixed_frame/target_frame 留空 => 输出在传感器系, 不需要 tf。 -->
+  <group if="$(arg convert)">
+    <node pkg="nodelet" type="nodelet" name="velodyne_nodelet_manager" args="manager"
+          output="screen" />
+    <node pkg="nodelet" type="nodelet" name="velodyne_transform"
+          args="load velodyne_pointcloud/TransformNodelet velodyne_nodelet_manager"
+          output="screen">
+      <param name="calibration" value="$(find velodyne_pointcloud)/params/VLP16db.yaml" />
+      <param name="model" value="VLP16" />
+      <param name="fixed_frame" value="" />
+      <param name="target_frame" value="" />
+      <param name="min_range" value="0.4" />
+      <param name="max_range" value="130.0" />
+      <param name="organize_cloud" value="false" />
+    </node>
+  </group>
+
+  <!-- MEI 原始图 -> 针孔校正图: 订阅 /camera_1/image_raw, 发布 /camera_1/image_pinhole -->
+  <node if="$(arg convert)" pkg="fast_livo" type="mei_to_pinhole.py"
+        name="mei_to_pinhole" output="screen">
+    <param name="in_topic" value="/camera_1/image_raw" />
+    <param name="out_topic" value="/camera_1/image_pinhole" />
+  </node>
 
   <rosparam command="load" file="$(find fast_livo)/config/SubT_MRS_Hawkins_Long_Corridor.yaml" />
 

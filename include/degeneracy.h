@@ -151,12 +151,14 @@ inline DegenResult DetectPoseDegeneracy(const Eigen::Matrix<double, 6, 6> &H_in,
   const Eigen::FullPivLU<Eigen::Matrix3d> lu_tt(h_tt);
   if (!lu_rr.isInvertible() || !lu_tt.isInvertible())
   {
-    // 严重秩亏：将所有位姿轴均视为退化，并将全部门控值钳制到下限
-    //（对应 DCReg 中 factorization_ok = false 的处理路径）。
+    // 严重秩亏：无法分解特征基，无从判断哪个轴可观，因此将整块测量视为
+    // 不可信 —— 门控全部置 0（强制"完全跳过"，即使软衰减的 gate_floor>0
+    // 也不放行任何秩亏信息），使 T=0 => H_att=0、HTz=0 => 该模态本帧不更新，
+    // 状态完全交给 IMU 先验。对应 DCReg 中 factorization_ok=false 的兜底路径。
     r.ok = false;
     r.is_degenerate = true;
     r.mask = {true, true, true, true, true, true};
-    r.gate.setConstant(std::min(1.0, std::max(p.gate_floor, 0.0)));
+    r.gate.setZero();
     r.lambda.setZero();
     r.cond_rot = std::numeric_limits<double>::infinity();
     r.cond_trans = std::numeric_limits<double>::infinity();
