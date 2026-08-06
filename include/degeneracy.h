@@ -158,7 +158,7 @@ inline DegenResult DetectPoseDegeneracy(const Eigen::Matrix<double, 6, 6> &H_in,
     r.ok = false;
     r.is_degenerate = true;
     r.mask = {true, true, true, true, true, true};
-    r.gate.setZero();
+    r.gate.setConstant(std::min(1.0, std::max(p.gate_floor, 0.0)));
     r.lambda.setZero();
     r.cond_rot = std::numeric_limits<double>::infinity();
     r.cond_trans = std::numeric_limits<double>::infinity();

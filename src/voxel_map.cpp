@@ -541,7 +541,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       }
       // 只要判为退化(含 ok=false 的秩亏全跳过)即施加;不再要求 ok==true,
       // 否则最严重的秩亏情形反而不做任何处理。
-      if (!degen_params_.diagnostic_only && last_degen_.is_degenerate)
+      if (!degen_params_.diagnostic_only &&  last_degen_.ok &&last_degen_.is_degenerate)
       {
         const Eigen::Matrix<double, 6, 6> T_att = degen::BuildAttenuationOperator(last_degen_);
         H_T_H.block<6, 6>(0, 0) = (T_att * H_T_H.block<6, 6>(0, 0) * T_att).eval();

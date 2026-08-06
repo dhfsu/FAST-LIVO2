@@ -1,8 +1,9 @@
 common:
-  img_topic: "/odin1/image/undistorted"
+  # mapping_odin1.launch decodes the sensor_msgs/CompressedImage input here.
+  img_topic: "/camera/rgb_decompressed"
   lid_topic: "/odin1/cloud_raw"
   imu_topic: "/odin1/imu"
-  img_en: 1
+  img_en: 0
   lidar_en: 1
   ros_driver_bug_fix: false
 
@@ -10,9 +11,8 @@ extrin_calib:
   extrinsic_T: [-0.02663, 0.03447, 0.02174]
   extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
 
-  # Rcl/Pcl = T_camera<-lidar (FAST-LIVO2 用 p_cam = Rcl*p_lidar + Pcl)。
-  # 原始配置给的是逆变换(T_lidar<-camera),导致点云投影全部落到画面外、VIO 无法建视觉地图。
-  # 此处已改为其逆:Rcl_new = Rcl_old^T, Pcl_new = -Rcl_old^T * Pcl_old(点云入图率 0%->57%)。
+  # Supplied Tcl_0: T_camera<-lidar. FAST-LIVO2 uses
+  # p_camera = Rcl * p_lidar + Pcl.
   Rcl: [0.01422, -0.99974, -0.0178,
         0.00268,  0.01784, -0.99984,
         0.99989,  0.01417,  0.00293]
@@ -20,7 +20,7 @@ extrin_calib:
 
 time_offset: 
   imu_time_offset: 0.0
-  img_time_offset: 0.1
+  img_time_offset: 0.0
   exposure_time_init: 0.0
 
 preprocess:
@@ -33,14 +33,14 @@ preprocess:
 
 vio:
   max_iterations: 5
-  outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
-  img_point_cov: 100 # 100 1000 
+  outlier_threshold: 500 # 78 100 156 #100 200 500 700 infinite
+  img_point_cov: 1000 # 100 1000 
   patch_size: 8
   patch_pyrimid_level: 4
   normal_en: true
   raycast_en: false
   inverse_composition_en: false
-  exposure_estimate_en: true
+  exposure_estimate_en: false
   inv_expo_cov: 0.1
 
 imu:
@@ -60,7 +60,7 @@ lio:
   min_eigen_value: 0.0025 # 0.005
   voxel_size: 0.5
   max_layer: 2
-  max_points_num: 50
+  max_points_num: 25
   layer_init_num: [5, 5, 5, 5, 5]
 
 local_map:  

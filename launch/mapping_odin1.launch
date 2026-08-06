@@ -1,9 +1,20 @@
 <launch>
-  <!-- Odin1（Livox Avia + 已去畸变图像）启动文件。 -->
+  <!-- Odin1 (LiDAR + FishPoly camera) launch file. -->
 
   <arg name="rviz" default="true" />
+  <arg name="compressed_image_topic" default="/odin1/image/compressed" />
+  <arg name="raw_image_topic" default="/camera/rgb_decompressed" />
 
   <rosparam command="load" file="$(find fast_livo)/config/odin1.yaml" />
+
+  <!-- The source topic itself is sensor_msgs/CompressedImage (it does not use
+       the conventional /compressed suffix). Remap the compressed transport's
+       resolved topic directly, then publish sensor_msgs/Image for FAST-LIVO2. -->
+  <node pkg="image_transport" type="republish" name="odin1_image_republish"
+        args="compressed raw" output="screen" respawn="true">
+    <remap from="in/compressed" to="$(arg compressed_image_topic)" />
+    <remap from="out" to="$(arg raw_image_topic)" />
+  </node>
 
   <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
     <rosparam file="$(find fast_livo)/config/camera_odin1.yaml" />

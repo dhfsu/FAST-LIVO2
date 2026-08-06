@@ -1,14 +1,21 @@
-cam_model: Pinhole
+# Odin1 #28 FishPoly calibration. FAST-LIVO2's single-camera loader names the
+# equivalent FishPoly implementation "PolynomialCamera".
+cam_model: PolynomialCamera
 cam_width: 1600
 cam_height: 1296
-scale: 1.0
-cam_fx: 737.96613595404403
-cam_fy: 738.337575483608
-cam_cx: 774.98906720636205
-cam_cy: 633.93873803262476
+cam_fx: 7.3796613595404403e+02   # A11
+cam_fy: 7.3833757548360790e+02   # A22
+cam_cx: 7.7498906720636205e+02   # u0
+cam_cy: 6.3393873803262476e+02   # v0
+cam_skew: 3.1140050736516178e-01 # A12
 
-# 输入图像已经去畸变，因此不再应用原始 FishPoly 畸变参数。
-cam_d0: 0.0
-cam_d1: 0.0
-cam_d2: 0.0
-cam_d3: 0.0
+k2: -2.0659203803537638e-03
+k3: -2.1769020613311138e-02
+k4: 2.7621164302063117e-02
+k5: -5.4570684083962608e-02
+k6: 3.9138670569754029e-02
+k7: -1.0976388738063967e-02
+
+# p1/p2 are zero in the supplied calibration. isFast, numDiff and
+# maxIncidentAngle are calibration-tool options and are not ROS camera-model
+# parameters used by FAST-LIVO2.

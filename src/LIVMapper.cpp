@@ -492,9 +492,9 @@ void LIVMapper::handleLIO()
 
   // 完全退化时(仅 LIVO 模式):此时 _state 仅为 IMU 先验,用它建图会污染体素平面。
   // 延后到下一个 handleVIO 用 refine 后的位姿再插入本帧点云。
-  if (slam_mode_ == LIVO && voxelmap_manager->lio_full_degenerate_)
+  if (slam_mode_ == LIVO && false)
   {
-    defer_lidar_insert_ = true;
+    // defer_lidar_insert_ = true;
     std::cout << "[ LIO ] fully degenerate -> defer map insertion until post-VIO pose" << std::endl;
   }
   else
